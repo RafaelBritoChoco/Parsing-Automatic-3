@@ -29,6 +29,13 @@ export interface Chunk {
 
 export type ModelType = 'FLASH_2_0' | 'FLASH' | 'FLASH_THINKING' | 'PRO';
 
+// Supported Language Codes:
+// AUTO: Detect
+// EN: English, PT: Portuguese, ES: Spanish, FR: French, DE: German, IT: Italian
+// NL: Dutch, RU: Russian, ZH: Chinese, JA: Japanese, KO: Korean, AR: Arabic
+// VI: Vietnamese, HI: Hindi
+export type LanguageCode = 'AUTO' | 'EN' | 'PT' | 'ES' | 'FR' | 'DE' | 'IT' | 'NL' | 'RU' | 'ZH' | 'JA' | 'KO' | 'AR' | 'VI' | 'HI';
+
 export interface AppState {
   files: File[]; // Changed from single file to array
   mode: 'FAST' | 'DEEP_OCR';
@@ -45,7 +52,7 @@ export interface AppState {
   auditReport: string | null; // New field for the Quality Check report
   showTranslation: boolean; // Toggle for split view
   includeAnnexes: boolean; // New toggle for Annex processing
-  language: 'EN' | 'FR' | 'PT'; // NEW: Document Language
+  language: LanguageCode; // NEW: Universal Document Language
 }
 
 export interface GemniConfig {

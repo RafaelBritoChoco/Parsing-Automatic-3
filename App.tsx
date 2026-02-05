@@ -5,7 +5,8 @@ import { createChunks, parseChunksFromFormattedText } from './services/chunkingS
 import { processTextWithPrompt, processBatchImagesOCR } from './services/geminiService';
 import { translateTextFree } from './services/freeTranslationService';
 import { restoreLayoutDeterministically } from './services/layoutRestorer';
-import { AppState, ProcessingStage, Chunk } from './types';
+import { detectLanguage } from './services/languageDetector'; // Import the new detector
+import { AppState, ProcessingStage, Chunk, LanguageCode } from './types';
 import { 
     PROMPT_CLEANING, PROMPT_STEP_1, PROMPT_STEP_2, PROMPT_STEP_3, 
     PROMPT_QUALITY_CHECK_CLEAN, PROMPT_QUALITY_CHECK_MACRO, PROMPT_QUALITY_CHECK_MICRO, 
@@ -22,7 +23,7 @@ const App: React.FC = () => {
     cleaningMode: 'DETERMINISTIC', targetChunkSize: 50000, chunks: [],
     stage: ProcessingStage.IDLE, progress: 0, error: null, totalTime: 0,
     apiCallCount: 0, auditReport: null, showTranslation: false,
-    includeAnnexes: true, language: 'EN'
+    includeAnnexes: true, language: 'AUTO'
   });
 
   const [activeTab, setActiveTab] = useState<'RAW' | 'CLEAN' | 'MACRO' | 'MICRO' | 'FINAL'>('RAW');
@@ -39,7 +40,6 @@ const App: React.FC = () => {
   const hasStep1 = hasChunks && state.chunks.some(c => c.step1Text && c.step1Text.trim().length > 0);
   const hasStep2 = hasChunks && state.chunks.some(c => c.step2Text && c.step2Text.trim().length > 0);
   const hasFinal = hasChunks && state.chunks.some(c => c.finalText && c.finalText.trim().length > 0);
-  const hasTextFilesOnly = state.files.length > 0 && state.files.every(f => f.type === 'text/plain' || f.type === 'text/html');
 
   const incrementApiCount = useCallback(() => setState(prev => ({ ...prev, apiCallCount: prev.apiCallCount + 1 })), []);
   const updateChunk = (id: number, fields: Partial<Chunk>) => setState(prev => ({ ...prev, chunks: prev.chunks.map(c => c.id === id ? { ...c, ...fields } : c) }));
@@ -105,6 +105,8 @@ const App: React.FC = () => {
     setState(prev => ({ ...prev, stage: ProcessingStage.EXTRACTING, progress: 0, error: null, chunks: [] }));
     setActiveTab('RAW');
     const { modelName } = getModelConfig(); let allChunks: Chunk[] = [];
+    let autoDetectedLang: LanguageCode = 'AUTO';
+
     try {
         for (let i = 0; i < state.files.length; i++) {
             if (cancelRef.current) throw new Error("Cancelled by user");
@@ -113,12 +115,29 @@ const App: React.FC = () => {
             if (f.type === 'application/pdf') {
                 txt = state.mode === 'FAST' ? await extractTextFast(f) : await processBatchImagesOCR(await extractImagesForDeepOCR(f), incrementApiCount, modelName);
             } else {
-                 txt = await f.text(); // Simplification for text/html which was handled inline before
+                 txt = await f.text(); 
             }
+            
+            // --- AUTO DETECT LANGUAGE ON FIRST CHUNK ---
+            if (i === 0 && state.language === 'AUTO') {
+                const detected = detectLanguage(txt);
+                if (detected !== 'AUTO') {
+                    autoDetectedLang = detected;
+                    console.log(`[AutoDetect] Language identified: ${detected}`);
+                }
+            }
+
             allChunks.push(...createChunks(txt, state.targetChunkSize, f.name, allChunks.length));
             setState(prev => ({ ...prev, chunks: [...allChunks], progress: ((i + 1) / state.files.length) * 100 }));
         }
-        setState(prev => ({ ...prev, stage: ProcessingStage.IDLE, progress: 100 }));
+        
+        setState(prev => ({ 
+            ...prev, 
+            stage: ProcessingStage.IDLE, 
+            progress: 100,
+            language: autoDetectedLang !== 'AUTO' ? autoDetectedLang : prev.language 
+        }));
+
     } catch (e: any) { setState(prev => ({ ...prev, stage: ProcessingStage.ERROR, error: e.message })); }
   };
 
@@ -140,7 +159,7 @@ const App: React.FC = () => {
           if (skipAnnex) { updateChunk(c.id, { [fieldMap[step]]: '', status: 'SKIPPED' }); continue; }
           updateChunk(c.id, { status: 'PROCESSING' });
           try {
-              let input = c[inputMap[step] as keyof Chunk] as string || c.originalText; // Fallback logic simplified
+              let input = c[inputMap[step] as keyof Chunk] as string || c.originalText;
               if (!input || input.includes('[SKIPPED')) { updateChunk(c.id, { status: 'FAILED' }); continue; }
               let prompt = '';
               if (step === 'CLEAN') prompt = PROMPT_CLEANING(state.language);
@@ -218,7 +237,7 @@ const App: React.FC = () => {
     <div className="min-h-screen flex flex-col items-center p-6 bg-slate-100 font-sans text-slate-800">
       <input type="file" ref={importInputRef} accept=".txt" className="hidden" onChange={handleImportFileChange} />
       <header className="w-full max-w-7xl mb-6 bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex justify-between items-center">
-        <div><h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-700 to-indigo-600">Structural OCR v3.3 (FTA)</h1></div>
+        <div><h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-700 to-indigo-600">Structural OCR v3.3 (Universal)</h1></div>
         <div className="flex gap-6 text-xs font-semibold text-slate-500 items-center">
              <div>FILES: <span className="text-indigo-600">{state.files.length}</span></div>
              <div>CHUNKS: <span className="text-indigo-600">{state.chunks.length}</span></div>
@@ -236,12 +255,35 @@ const App: React.FC = () => {
                 <input type="file" ref={fileInputRef} accept=".pdf, .txt, .html" multiple onChange={handleFileUpload} className="hidden" />
                 <button onClick={() => fileInputRef.current?.click()} className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-4 py-2 rounded-lg font-bold text-sm transition-colors border border-indigo-200 flex items-center gap-2"><IconUpload />{state.files.length === 0 ? "Select Documents" : `${state.files.length} Docs Selected`}</button>
              </div>
-             <div className="flex gap-4 items-center">
+             <div className="flex gap-4 items-center flex-wrap justify-end">
                  <div className="flex items-center gap-2 bg-slate-50 p-1.5 rounded-lg border border-slate-200">
-                     <span className="text-[10px] font-bold text-slate-500 pl-2">Language:</span>
-                     {['EN', 'FR', 'PT'].map(l => <button key={l} onClick={() => setState(s => ({...s, language: l as any}))} className={`px-3 py-1 rounded text-[10px] font-bold uppercase transition-all ${state.language === l ? 'bg-white text-indigo-700 shadow-sm border border-indigo-200' : 'text-slate-400'}`}>{l}</button>)}
+                     <span className="text-[10px] font-bold text-slate-500 pl-2">Target Language:</span>
+                     <select 
+                        value={state.language} 
+                        onChange={(e) => setState(s => ({...s, language: e.target.value as LanguageCode}))}
+                        className="text-[11px] font-bold uppercase bg-white border border-slate-300 rounded px-2 py-1 text-indigo-700 focus:outline-none focus:border-indigo-500 cursor-pointer"
+                     >
+                        <option value="AUTO">🌍 AUTO (Universal)</option>
+                        <option disabled>--- Americas/Europe ---</option>
+                        <option value="EN">🇺🇸 English</option>
+                        <option value="PT">🇧🇷 Portuguese</option>
+                        <option value="ES">🇪🇸 Spanish</option>
+                        <option value="FR">🇫🇷 French</option>
+                        <option value="DE">🇩🇪 German</option>
+                        <option value="IT">🇮🇹 Italian</option>
+                        <option value="NL">🇳🇱 Dutch</option>
+                        <option value="RU">🇷🇺 Russian</option>
+                        <option disabled>--- Asia/MidEast ---</option>
+                        <option value="ZH">🇨🇳 Chinese</option>
+                        <option value="JA">🇯🇵 Japanese</option>
+                        <option value="KO">🇰🇷 Korean</option>
+                        <option value="VI">🇻🇳 Vietnamese</option>
+                        <option value="AR">🇸🇦 Arabic</option>
+                        <option value="HI">🇮🇳 Hindi</option>
+                     </select>
                  </div>
                  <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex gap-1"><button onClick={() => setState(s => ({...s, includeAnnexes: !s.includeAnnexes}))} className={`px-3 py-1 rounded text-[10px] font-bold uppercase transition-all ${state.includeAnnexes ? 'bg-white text-green-600 shadow-sm' : 'text-red-500'}`}>{state.includeAnnexes ? 'INCLUDE' : 'SKIP'}</button></div>
+                 <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex gap-1"><button onClick={() => setState(s => ({...s, mode: 'FAST'}))} className={`px-3 py-1 rounded text-[10px] font-bold uppercase transition-all ${state.mode === 'FAST' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>Fast Text</button><button onClick={() => setState(s => ({...s, mode: 'DEEP_OCR'}))} className={`px-3 py-1 rounded text-[10px] font-bold uppercase transition-all ${state.mode === 'DEEP_OCR' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>Deep OCR</button></div>
                  <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex gap-1">
                      {['FLASH_2_0', 'FLASH', 'FLASH_THINKING', 'PRO'].map(m => <button key={m} onClick={() => setState(s => ({...s, modelType: m as any}))} className={`px-3 py-1 rounded text-[10px] font-bold font-mono transition-all ${state.modelType === m ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-400'}`}>{m.replace('FLASH_THINKING', 'THINK').replace('FLASH_2_0', '2.0').replace('FLASH', '3.0')}</button>)}
                  </div>

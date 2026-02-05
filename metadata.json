@@ -1,5 +1,5 @@
 {
-  "name": "Copy of Parsing 3",
+  "name": "NEW Parsing 3",
   "description": "Advanced Lossless Structural OCR tool using Google Gemini 2.0 / 3. Preserves legal hierarchy, sanitizes text, and applies semantic tagging for complex documents.",
   "requestFramePermissions": []
 }
