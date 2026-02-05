@@ -1,4 +1,5 @@
 
+import JSZip from 'jszip';
 import { Chunk } from '../types';
 
 export const getFieldForTab = (tab: string): keyof Chunk | null => {
@@ -66,4 +67,53 @@ export const parseGlobalChange = (newText: string, currentChunks: Chunk[], activ
         }
     }
     return found ? newChunks : currentChunks;
+};
+
+export const downloadCurrentTab = async (chunks: Chunk[], activeTab: string) => {
+    const field = getFieldForTab(activeTab);
+    if (!field) return;
+    const getCleanFileName = (originalName: string, tab: string) => {
+        let name = originalName.replace(/\.[^/.]+$/, "");
+        name = name.replace(/^(processed_[A-Z]+_)+/g, '');
+        name = name.replace(/ - Step \d.*$/i, '');
+        name = name.replace(/ - Raw$/i, '');
+        let suffix = '';
+        switch (tab) {
+            case 'RAW': suffix = 'Raw'; break;
+            case 'CLEAN': suffix = 'Step 2 - Clean'; break;
+            case 'MACRO': suffix = 'Step 3 - Macro'; break;
+            case 'MICRO': suffix = 'Step 4 - Micro'; break;
+            case 'FINAL': suffix = 'Step 5 - Final'; break;
+            default: suffix = tab;
+        }
+        return `${name.trim()} - ${suffix}.txt`;
+    };
+    const filesContent = new Map<string, string>();
+    chunks.forEach(c => {
+        const content = c[field] || '';
+        const current = filesContent.get(c.fileName) || '';
+        filesContent.set(c.fileName, current + content + '\n\n');
+    });
+    if (filesContent.size === 1) {
+        const [fileName, text] = filesContent.entries().next().value;
+        const blob = new Blob([text], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = getCleanFileName(fileName, activeTab);
+        a.click();
+        URL.revokeObjectURL(url);
+        return;
+    }
+    const zip = new JSZip();
+    filesContent.forEach((text, fileName) => {
+        zip.file(getCleanFileName(fileName, activeTab), text);
+    });
+    const content = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(content);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Batch_Export_${activeTab}.zip`;
+    a.click();
+    URL.revokeObjectURL(url);
 };
