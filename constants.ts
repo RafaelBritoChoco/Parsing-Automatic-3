@@ -118,15 +118,18 @@ Previous chunk ended with: "...${previousContext.slice(-200).replace(/\n/g, ' ')
 
 **ALGORITHM:**
 1. **PRESERVE** existing {{levelN}} tags from Step 3.
-2. **WRAP** all other text (paragraphs, lists, table rows) in {{text_level}}...{{-text_level}}.
-3. **ASSIGN GRANULAR HIERARCHY (Inside {{text_level}}):**
+2. **IDENTIFY** Footnotes ({{footnoteN}}...{{-footnoteN}}). **DO NOT TOUCH THEM.**
+   - **CRITICAL:** Footnotes must **NOT** be wrapped in {{text_level}}.
+   - **CRITICAL:** Footnotes must **NOT** contain {{levelN}} tags inside.
+3. **WRAP** all *other* text (paragraphs, lists, table rows) in {{text_level}}...{{-text_level}}.
+4. **ASSIGN GRANULAR HIERARCHY (Inside {{text_level}}):**
    - For every paragraph/item inside the text block, assign a {{levelN}} based on indentation/logic.
    - **Reference Level (H):** The level of the Headline above this text.
    - **Start Level:** The first paragraph usually starts at **H+1**.
    - **Lists:** Bullet points or numbered lists usually go to **H+2**.
 
 **OUTPUT:**
-Full text with {{text_level}} wrapping and granular {{levelN}} tags.
+Full text with {{text_level}} wrapping and granular {{levelN}} tags. Footnotes must remain completely separate.
 `;
 
 export const PROMPT_STEP_3 = (previousContext: string) => `
@@ -136,6 +139,7 @@ You are a "Structure Auditor" (Step 5).
 
 **TASK:** Fix structural errors.
 1. Ensure ALL body text is inside {{text_level}}.
+   - **EXCEPTION:** Footnotes ({{footnoteN}}...{{-footnoteN}}) MUST REMAIN OUTSIDE {{text_level}}.
 2. Ensure tags are closed (e.g. {{-level1}}).
 3. Do NOT summarize or change the words.
 
@@ -168,7 +172,8 @@ You are a Structural QA Specialist.
 Analyze the provided text (Step 4 - Micro).
 **CHECKLIST:**
 1. **Containment:** Is all body text inside {{text_level}}?
-2. **Depth:** Does body text have {{levelN}} tags?
+2. **Footnotes:** Are footnotes ({{footnoteN}}) OUTSIDE of {{text_level}}?
+3. **Depth:** Does body text have {{levelN}} tags?
 **OUTPUT FORMAT:** Quality Score (0-100), Status, Key Issues.
 `;
 
