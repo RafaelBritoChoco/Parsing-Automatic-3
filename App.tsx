@@ -1,11 +1,11 @@
 
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { extractTextFast, extractImagesForDeepOCR } from './services/pdfExtractor';
 import { createChunks, parseChunksFromFormattedText } from './services/chunkingService';
 import { processTextWithPrompt, processBatchImagesOCR } from './services/geminiService';
 import { translateTextFree } from './services/freeTranslationService';
 import { restoreLayoutDeterministically } from './services/layoutRestorer';
-import { detectLanguage } from './services/languageDetector'; // Import the new detector
+import { detectLanguage } from './services/languageDetector';
 import { AppState, ProcessingStage, Chunk, LanguageCode } from './types';
 import { 
     PROMPT_CLEANING, PROMPT_STEP_1, PROMPT_STEP_2, PROMPT_STEP_3, 
@@ -14,7 +14,7 @@ import {
 } from './constants';
 import ResultViewer from './components/ResultViewer';
 import { StepCard } from './components/StepCard';
-import { IconCheck, IconUpload, IconSearch, IconWand, IconArchive, IconTranslate, IconImport } from './components/Icons';
+import { IconCheck, IconUpload, IconSearch, IconWand, IconArchive, IconTranslate, IconImport, IconPlay } from './components/Icons';
 import * as FormatUtils from './services/formatUtils';
 
 const App: React.FC = () => {
@@ -23,7 +23,8 @@ const App: React.FC = () => {
     cleaningMode: 'DETERMINISTIC', targetChunkSize: 50000, chunks: [],
     stage: ProcessingStage.IDLE, progress: 0, error: null, totalTime: 0,
     apiCallCount: 0, auditReport: null, showTranslation: false,
-    includeAnnexes: true, language: 'AUTO'
+    includeAnnexes: true, language: 'AUTO',
+    autoRunTarget: null // Initialize as null
   });
 
   const [activeTab, setActiveTab] = useState<'RAW' | 'CLEAN' | 'MACRO' | 'MICRO' | 'FINAL'>('RAW');
@@ -44,16 +45,64 @@ const App: React.FC = () => {
   const incrementApiCount = useCallback(() => setState(prev => ({ ...prev, apiCallCount: prev.apiCallCount + 1 })), []);
   const updateChunk = (id: number, fields: Partial<Chunk>) => setState(prev => ({ ...prev, chunks: prev.chunks.map(c => c.id === id ? { ...c, ...fields } : c) }));
 
+  // --- AUTO PIPELINE ORCHESTRATOR ---
+  // This useEffect watches the stage. When IDLE, if there is an autoRunTarget, it triggers the next step.
+  useEffect(() => {
+    if (state.stage !== ProcessingStage.IDLE || !state.autoRunTarget || state.error || cancelRef.current) return;
+
+    // Define the sequence order
+    const sequence = ['RAW', 'CLEAN', 'MACRO', 'MICRO', 'FINAL'];
+    const targetIndex = sequence.indexOf(state.autoRunTarget);
+
+    const executeNext = async () => {
+        if (!hasChunks) {
+            console.log("[AutoRun] Starting Extraction...");
+            await runExtraction();
+        } 
+        else if (!hasCleaned && targetIndex >= 1) {
+            console.log("[AutoRun] Starting Cleaning...");
+            await runStepOnAllChunks('CLEAN');
+        }
+        else if (!hasStep1 && targetIndex >= 2) {
+            console.log("[AutoRun] Starting Macro...");
+            await runStepOnAllChunks('MACRO');
+        }
+        else if (!hasStep2 && targetIndex >= 3) {
+            console.log("[AutoRun] Starting Micro...");
+            await runStepOnAllChunks('MICRO');
+        }
+        else if (!hasFinal && targetIndex >= 4) {
+            console.log("[AutoRun] Starting Final Patch...");
+            await runStepOnAllChunks('PATCH');
+        }
+        else {
+            // Target reached or everything done
+            console.log("[AutoRun] Pipeline Complete or Target Reached.");
+            setState(s => ({ ...s, autoRunTarget: null }));
+            // Alert user visually via tab switch (handled in runStep) or just finish
+        }
+    };
+
+    // Use a small timeout to let state settle before triggering next async operation
+    const timer = setTimeout(() => {
+        executeNext();
+    }, 500);
+
+    return () => clearTimeout(timer);
+
+  }, [state.stage, state.autoRunTarget, hasChunks, hasCleaned, hasStep1, hasStep2, hasFinal, state.error]);
+
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      setState(prev => ({ ...prev, files: Array.from(e.target.files!), chunks: [], stage: ProcessingStage.IDLE, error: null, apiCallCount: 0, auditReport: null }));
+      setState(prev => ({ ...prev, files: Array.from(e.target.files!), chunks: [], stage: ProcessingStage.IDLE, error: null, apiCallCount: 0, auditReport: null, autoRunTarget: null }));
       setActiveTab('RAW');
     }
   };
 
   const handleCancel = () => {
     cancelRef.current = true;
-    setState(prev => ({ ...prev, stage: ProcessingStage.IDLE, error: "Process cancelled by user.", chunks: prev.chunks.map(c => c.status === 'PROCESSING' ? { ...c, status: 'PENDING' } : c) }));
+    setState(prev => ({ ...prev, stage: ProcessingStage.IDLE, autoRunTarget: null, error: "Process cancelled by user.", chunks: prev.chunks.map(c => c.status === 'PROCESSING' ? { ...c, status: 'PENDING' } : c) }));
   };
 
   const triggerImport = (targetStep: 'CLEAN' | 'MACRO' | 'MICRO' | 'PATCH') => {
@@ -118,7 +167,6 @@ const App: React.FC = () => {
                  txt = await f.text(); 
             }
             
-            // --- AUTO DETECT LANGUAGE ON FIRST CHUNK ---
             if (i === 0 && state.language === 'AUTO') {
                 const detected = detectLanguage(txt);
                 if (detected !== 'AUTO') {
@@ -138,7 +186,7 @@ const App: React.FC = () => {
             language: autoDetectedLang !== 'AUTO' ? autoDetectedLang : prev.language 
         }));
 
-    } catch (e: any) { setState(prev => ({ ...prev, stage: ProcessingStage.ERROR, error: e.message })); }
+    } catch (e: any) { setState(prev => ({ ...prev, stage: ProcessingStage.ERROR, error: e.message, autoRunTarget: null })); }
   };
 
   const runStepOnAllChunks = async (step: 'CLEAN' | 'MACRO' | 'MICRO' | 'PATCH') => {
@@ -150,12 +198,21 @@ const App: React.FC = () => {
 
       setState(prev => ({ ...prev, stage: stageMap[step], progress: 0 })); setActiveTab(nextTabMap[step]);
       const { modelName, thinkingBudget } = getModelConfig();
-      let prevCtx = ""; let curFile = ""; let skipAnnex = false;
+      
+      let prevCtx = ""; 
+      let curFile = ""; 
+      let skipAnnex = false;
+      let lastLevel = -1; // TRACKS HIERARCHY STATE: -1 indicates Start of File
 
       for (let i = 0; i < state.chunks.length; i++) {
           if (cancelRef.current) break;
           const c = state.chunks[i];
-          if (c.fileName !== curFile) { prevCtx = ""; curFile = c.fileName; skipAnnex = false; }
+          if (c.fileName !== curFile) { 
+              prevCtx = ""; 
+              curFile = c.fileName; 
+              skipAnnex = false; 
+              lastLevel = -1; // Reset level on new file to -1
+          }
           if (skipAnnex) { updateChunk(c.id, { [fieldMap[step]]: '', status: 'SKIPPED' }); continue; }
           updateChunk(c.id, { status: 'PROCESSING' });
           try {
@@ -165,7 +222,7 @@ const App: React.FC = () => {
               if (step === 'CLEAN') prompt = PROMPT_CLEANING(state.language);
               else if (step === 'MACRO') prompt = PROMPT_STEP_1(prevCtx === "", state.language);
               else if (step === 'MICRO') prompt = PROMPT_STEP_2(prevCtx, state.language);
-              else prompt = PROMPT_STEP_3(prevCtx);
+              else prompt = PROMPT_STEP_3(prevCtx, lastLevel); // PASS STATE
 
               let res = '';
               if (step === 'CLEAN' && state.cleaningMode === 'DETERMINISTIC') {
@@ -176,8 +233,25 @@ const App: React.FC = () => {
               }
 
               if (step === 'MACRO' && !state.includeAnnexes && res.match(/{{level\d+}}\s*(ANNEX|APPENDIX|SCHEDULE|ATTACHMENT|ANNEXE|APÊNDICE)/i)) skipAnnex = true;
-              updateChunk(c.id, { [fieldMap[step]]: res, status: 'COMPLETED' }); prevCtx = res.slice(-1500);
-          } catch (e) { updateChunk(c.id, { status: 'FAILED' }); setState(prev => ({ ...prev, stage: ProcessingStage.ERROR, error: "Error at chunk " + c.id })); break; }
+              
+              updateChunk(c.id, { [fieldMap[step]]: res, status: 'COMPLETED' }); 
+              prevCtx = res.slice(-1500);
+
+              // UPDATE STATE FOR NEXT CHUNK (PATCH STEP ONLY)
+              if (step === 'PATCH') {
+                  const matches = res.match(/{{level(\d+)}}/g);
+                  if (matches && matches.length > 0) {
+                      const lastTag = matches[matches.length - 1];
+                      const levelNum = parseInt(lastTag.replace(/\D/g, ''));
+                      if (!isNaN(levelNum)) lastLevel = levelNum;
+                  }
+              }
+
+          } catch (e) { 
+              updateChunk(c.id, { status: 'FAILED' }); 
+              setState(prev => ({ ...prev, stage: ProcessingStage.ERROR, error: "Error at chunk " + c.id, autoRunTarget: null })); 
+              break; 
+          }
           setState(prev => ({ ...prev, progress: ((i + 1) / state.chunks.length) * 100 }));
       }
       if (!cancelRef.current && state.stage !== ProcessingStage.ERROR) setState(prev => ({ ...prev, stage: ProcessingStage.IDLE }));
@@ -255,6 +329,31 @@ const App: React.FC = () => {
                 <input type="file" ref={fileInputRef} accept=".pdf, .txt, .html" multiple onChange={handleFileUpload} className="hidden" />
                 <button onClick={() => fileInputRef.current?.click()} className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-4 py-2 rounded-lg font-bold text-sm transition-colors border border-indigo-200 flex items-center gap-2"><IconUpload />{state.files.length === 0 ? "Select Documents" : `${state.files.length} Docs Selected`}</button>
              </div>
+             
+             {/* --- AUTO RUN CONTROLS --- */}
+             <div className="flex-1 flex justify-center items-center gap-2">
+                 {state.files.length > 0 && (
+                     <div className="flex items-center gap-2 bg-gradient-to-r from-indigo-50 to-blue-50 p-1.5 rounded-lg border border-indigo-200 shadow-sm animate-fade-in">
+                         <span className="text-[10px] font-bold text-indigo-800 pl-2 uppercase tracking-wide">⚡ Auto-Process:</span>
+                         <div className="flex rounded overflow-hidden border border-indigo-200">
+                            {['CLEAN', 'MACRO', 'MICRO', 'FINAL'].map((step, idx) => (
+                                <button 
+                                    key={step} 
+                                    disabled={state.stage !== ProcessingStage.IDLE}
+                                    onClick={() => setState(s => ({...s, autoRunTarget: step as any}))} 
+                                    className={`px-3 py-1.5 text-[10px] font-bold uppercase transition-all ${state.autoRunTarget === step || (state.autoRunTarget && idx <= ['CLEAN', 'MACRO', 'MICRO', 'FINAL'].indexOf(state.autoRunTarget)) ? 'bg-indigo-600 text-white' : 'bg-white text-indigo-400 hover:bg-indigo-50'}`}
+                                >
+                                    {step === 'FINAL' ? 'Patch (End)' : step}
+                                </button>
+                            ))}
+                         </div>
+                         {state.autoRunTarget && state.stage !== ProcessingStage.IDLE && (
+                             <div className="text-[10px] text-indigo-600 font-bold animate-pulse px-2">Running to {state.autoRunTarget}...</div>
+                         )}
+                     </div>
+                 )}
+             </div>
+
              <div className="flex gap-4 items-center flex-wrap justify-end">
                  <div className="flex items-center gap-2 bg-slate-50 p-1.5 rounded-lg border border-slate-200">
                      <span className="text-[10px] font-bold text-slate-500 pl-2">Target Language:</span>
@@ -283,14 +382,15 @@ const App: React.FC = () => {
                      </select>
                  </div>
                  <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex gap-1"><button onClick={() => setState(s => ({...s, includeAnnexes: !s.includeAnnexes}))} className={`px-3 py-1 rounded text-[10px] font-bold uppercase transition-all ${state.includeAnnexes ? 'bg-white text-green-600 shadow-sm' : 'text-red-500'}`}>{state.includeAnnexes ? 'INCLUDE' : 'SKIP'}</button></div>
-                 <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex gap-1"><button onClick={() => setState(s => ({...s, mode: 'FAST'}))} className={`px-3 py-1 rounded text-[10px] font-bold uppercase transition-all ${state.mode === 'FAST' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>Fast Text</button><button onClick={() => setState(s => ({...s, mode: 'DEEP_OCR'}))} className={`px-3 py-1 rounded text-[10px] font-bold uppercase transition-all ${state.mode === 'DEEP_OCR' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>Deep OCR</button></div>
                  <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex gap-1">
                      {['FLASH_2_0', 'FLASH', 'FLASH_THINKING', 'PRO'].map(m => <button key={m} onClick={() => setState(s => ({...s, modelType: m as any}))} className={`px-3 py-1 rounded text-[10px] font-bold font-mono transition-all ${state.modelType === m ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-400'}`}>{m.replace('FLASH_THINKING', 'THINK').replace('FLASH_2_0', '2.0').replace('FLASH', '3.0')}</button>)}
                  </div>
              </div>
         </div>
         <div className="grid grid-cols-5 gap-4">
-            <StepCard step="1" title="Extract & Chunk" isActive={state.stage === ProcessingStage.EXTRACTING} isCompleted={hasChunks} isReady={true} onRun={runExtraction} runLabel={hasChunks ? 'Re-Run' : 'Start'} disabled={state.files.length === 0 || state.stage !== ProcessingStage.IDLE} dataLabel={!hasChunks ? <div className="text-slate-300">---</div> : undefined} buttonClass="bg-indigo-600 text-white hover:bg-indigo-700 shadow-md" />
+            <StepCard step="1" title="Extract & Chunk" isActive={state.stage === ProcessingStage.EXTRACTING} isCompleted={hasChunks} isReady={true} onRun={runExtraction} runLabel={hasChunks ? 'Re-Run' : 'Start'} disabled={state.files.length === 0 || state.stage !== ProcessingStage.IDLE} dataLabel={!hasChunks ? <div className="text-slate-300">---</div> : undefined} buttonClass="bg-indigo-600 text-white hover:bg-indigo-700 shadow-md">
+                <div className="flex bg-slate-100 rounded p-0.5 mb-2 w-full"><button onClick={() => setState(s => ({...s, mode: 'FAST'}))} className={`flex-1 text-[9px] font-bold py-1 rounded transition-colors ${state.mode === 'FAST' ? 'bg-white shadow text-blue-700' : 'text-slate-400 hover:text-slate-600'}`}>Native (Fast)</button><button onClick={() => setState(s => ({...s, mode: 'DEEP_OCR'}))} className={`flex-1 text-[9px] font-bold py-1 rounded transition-colors ${state.mode === 'DEEP_OCR' ? 'bg-white shadow text-indigo-700' : 'text-slate-400 hover:text-slate-600'}`}>OCR (Vision)</button></div>
+            </StepCard>
             <StepCard step="2" title={state.cleaningMode === 'DETERMINISTIC' ? 'Safe Layout Fix' : 'Deep Cleaning'} isActive={state.stage === ProcessingStage.CLEANING} isCompleted={hasCleaned} isReady={hasChunks} onRun={() => runStepOnAllChunks('CLEAN')} onImport={() => triggerImport('CLEAN')} runLabel={`Run ${state.cleaningMode === 'DETERMINISTIC' ? 'Safe Clean' : 'AI Clean'}`} disabled={!hasChunks || state.stage !== ProcessingStage.IDLE} dataLabel={!hasChunks ? <span className="text-xs text-slate-300">No Data</span> : undefined}>
                 <div className="flex bg-slate-100 rounded p-0.5 mb-2 w-full"><button onClick={() => setState(s => ({...s, cleaningMode: 'DETERMINISTIC'}))} className={`flex-1 text-[9px] font-bold py-1 rounded transition-colors ${state.cleaningMode === 'DETERMINISTIC' ? 'bg-white shadow text-teal-700' : 'text-slate-400 hover:text-slate-600'}`}>SAFE (Math)</button><button onClick={() => setState(s => ({...s, cleaningMode: 'AI'}))} className={`flex-1 text-[9px] font-bold py-1 rounded transition-colors ${state.cleaningMode === 'AI' ? 'bg-white shadow text-indigo-700' : 'text-slate-400 hover:text-slate-600'}`}>AI (Deep)</button></div>
             </StepCard>

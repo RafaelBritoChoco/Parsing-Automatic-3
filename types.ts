@@ -53,6 +53,7 @@ export interface AppState {
   showTranslation: boolean; // Toggle for split view
   includeAnnexes: boolean; // New toggle for Annex processing
   language: LanguageCode; // NEW: Universal Document Language
+  autoRunTarget: 'CLEAN' | 'MACRO' | 'MICRO' | 'FINAL' | null; // NEW: Controls the auto-pipeline
 }
 
 export interface GemniConfig {
