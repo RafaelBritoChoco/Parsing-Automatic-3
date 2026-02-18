@@ -1,62 +1,33 @@
 
 // ============================================================================
-// STEP 5: FINAL PATCH (SEMANTIC INTERPRETATION & HIERARCHY)
+// STEP 5: FINAL PATCH (HIERARCHY AUDIT)
 // ============================================================================
-// Goal: Interpret the text content to validate and correct the hierarchy.
-// NO blind rules. NO deterministic assumptions. PURE READING COMPREHENSION.
+// Goal: Fix continuity issues between chunks.
 
 export const PROMPT_STEP_3 = (previousContext: string, lastLevel: number = -1) => `
-You are a **Semantic Document Interpreter**.
-**INPUT:** Text with structural tags ({{levelN}}, {{text_level}}) that may be logically incorrect.
-**OUTPUT:** The same text, but with tags corrected based on the **meaning** and **relationship** of the content.
+You are a "Hierarchy Auditor" (Step 5 - Final Patch).
+**TASK:** Fix structural discontinuities caused by chunk splitting.
 
-**YOUR CORE TASK:**
-Read the text. Understand the **Parent-Child** relationships between Headers, Paragraphs, and Lists. 
-Correct the {{levelN}} tags to reflect this semantic structure.
+**CONTEXT STATE:**
+${lastLevel === -1 
+  ? "**START OF DOCUMENT DETECTED.** There is NO previous chunk. Treat this as the beginning. Preserve {{level0}} and Level 1 headers found here." 
+  : `The PREVIOUS chunk ended at **Heading Level ${lastLevel}**.`
+}
+Previous Text Snippet: "...${previousContext.slice(-250).replace(/\n/g, ' ')}..."
 
-**INTERPRETATION RULES (READ THE CONTENT):**
+**HIERARCHY RULES:**
+1. **CONTINUITY (CRITICAL):**
+   ${lastLevel === -1 ? '- Since this is the start, TRUST the existing tags.' : `
+   - If the first heading in this text is a **sibling** (continuation) of the previous section (e.g. Prev was "Article 1.15", this is "Article 1.16"), it MUST be **Level ${lastLevel}**.
+   - If the first heading is a **child** (subsection), it MUST be **Level ${lastLevel + 1}**.
+   - **DO NOT RESET TO LEVEL 1** unless the text is clearly a NEW Major Document Part.
+   `}
 
-1. **IDENTIFY PARENTS (Headers):**
-   - Headers are titles like "Article 1", "Chapter 3", "Introduction", "Preamble".
-   - They usually sit at the Root (outside {{text_level}}).
-   - *Example Level:* {{level1}}
+2. **INTEGRITY:**
+   - Ensure all body text is inside {{text_level}}.
+   - Ensure Footnotes ({{footnoteN}}) are OUTSIDE {{text_level}}.
+   - Close any unclosed tags.
 
-2. **IDENTIFY CHILDREN (Body Text):**
-   - Read the text immediately following a Header.
-   - **Ask:** "Is this text the content/description of the Header above?"
-   - **Action:** If YES, it must be **ONE LEVEL DEEPER** than the Header.
-   - *Correction:* If Header is {{level1}}, the Body Paragraph MUST be {{level2}}.
-   - **Error to Fix:** Do NOT allow Body Text to be at the same level as its Header.
-
-3. **IDENTIFY GRANDCHILDREN (Lists & Clauses):**
-   - Read the body text. Look for enumerations like "(a)", "(b)", "1.", "i.".
-   - **Ask:** "Is this a list item belonging to the paragraph above?"
-   - **Action:** If YES, it must be **ONE LEVEL DEEPER** than the intro paragraph.
-   - *Correction:* If Intro Paragraph is {{level2}}, the List Item MUST be {{level3}}.
-
-**STRICT ENCAPSULATION RULES:**
-- **Headers:** MUST be outside {{text_level}}.
-- **Body Content:** ALL paragraphs, lists, and clauses MUST be wrapped in {{text_level}}...{{-text_level}}.
-- **Footnotes:** MUST be isolated at the Root (outside {{text_level}}).
-
-**PREVIOUS CONTEXT:**
-- The document flow ended at Hierarchy Level: **${lastLevel === -1 ? 'Unknown' : lastLevel}**.
-- If the chunk starts with text (no header), interpret it as continuing the previous level.
-
-**EXAMPLE OF LOGIC TO APPLY:**
-*Input (Wrong):*
-{{level1}}Article 5{{-level1}}
-{{text_level}}
-{{level1}}The company shall...{{-level1}}  <-- WRONG: Same level as Header
-{{level2}}(a) pay taxes...{{-level2}}      <-- WRONG: Gap is too big (1->2 is ok, but parent was wrong)
-{{-text_level}}
-
-*Output (Corrected by Reading):*
-{{level1}}Article 5{{-level1}}
-{{text_level}}
-{{level2}}The company shall...{{-level2}}  <-- FIXED: Child of Article 5 (1+1=2)
-{{level3}}(a) pay taxes...{{-level3}}      <-- FIXED: Child of Paragraph (2+1=3)
-{{-text_level}}
-
-**EXECUTE SEMANTIC CORRECTION NOW.**
+**OUTPUT:**
+Return the full text with corrected hierarchy levels.
 `;
