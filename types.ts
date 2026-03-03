@@ -27,7 +27,7 @@ export interface Chunk {
   lastHeadlineLevel?: number; // Context for stateful patch
 }
 
-export type ModelType = 'FLASH_2_0' | 'FLASH' | 'FLASH_THINKING' | 'PRO';
+export type ModelType = 'FLASH_2_0' | 'FLASH' | 'FLASH_THINKING' | 'PRO' | 'PRO_3_1';
 
 // Supported Language Codes:
 // AUTO: Detect

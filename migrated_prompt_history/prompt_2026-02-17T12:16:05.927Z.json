@@ -1,0 +1,64 @@
+[
+  {
+    "id": 0,
+    "author": "user",
+    "payload": {
+      "type": "text",
+      "text": "o OCR trocou o • por - , mexa somente no OCR e coloque para q nao mude o conteudo de itens e etcs, tem q manter o mais fiel possivel no step 1",
+      "files": [],
+      "fileUploads": [],
+      "cssBlocks": [],
+      "cMarkNode": {}
+    },
+    "createdTimestamp": {
+      "seconds": 1771330467,
+      "nanos": 374000000
+    }
+  },
+  {
+    "id": 1,
+    "author": "model",
+    "payload": {
+      "type": "thinking",
+      "text": "**Refining Extraction Logic**\n\nI'm focused on the OCR behavior, specifically the `extractTextFast` function within `services/pdfExtractor.ts`. I noticed bullet points are incorrectly rendered as hyphens. My immediate goal is to address this discrepancy, ensuring accurate preservation of original formatting during text extraction. I'm investigating how this replacement occurs.\n\n\n**Pinpointing List Conversion**\n\nI've traced the bullet-to-hyphen issue. My focus has shifted from `extractTextFast` to the OCR prompts. It appears `PROMPT_OCR_VISION` within `prompts/ocr.ts` is the culprit, instructing the model to convert bullet points to Markdown lists using hyphens. This suggests the Deep OCR (Vision) mode is the one that introduces the undesired conversion.\n\n\n**Isolating OCR Influence**\n\nI'm now zeroing in on the interaction between modes. If `extractTextFast` is used (Native), `pdfjs` should extract directly. I've confirmed no direct character replacement occurs within `extractTextFast`. It is also important to consider if bullet characters from fonts get converted. The issue seems specific to OCR (Vision) mode and its prompt, which explicitly requests list detection and conversion using bullets.\n\n\n**Modifying List Preservation**\n\nI'm zeroing in on the list conversion within `PROMPT_OCR_VISION`. The goal is to preserve original bullet characters, like `•`, instead of converting them to hyphens. I've updated the prompt instructions to specifically request *preservation* of the original bullets. This directly addresses the user's issue with bullet point replacement. The prompt now instructs the model to preserve the original bullet character, and not normalize to a hyphen.\n\n\n**Prioritizing Bullet Preservation**\n\nI'm now focusing on ensuring bullet character fidelity. The user's emphasis on faithful character retention in the initial step reinforces the necessity. I'm updating `prompts/ocr.ts` to directly instruct the model to preserve original bullet characters, specifically addressing the existing Markdown conversion and replacing hyphens. I've ruled out `extractTextFast` as the source, as that's quite raw.\n\n\n**Verifying Prompt Completeness**\n\nI'm revisiting the prompt in `prompts/ocr.ts`, specifically `PROMPT_OCR_VISION`, confirming preservation is addressed. I'm focusing on the list section and ensuring it now explicitly instructs the model to preserve exact bullet characters. This aligns with the user's focus on direct character retention. I'm checking that the instructions are unambiguous and cover all scenarios. While working on Step 1, I should also check Step 2, just in case.\n\n\n**Addressing Superscripts and Footnotes**\n\nI'm now prioritizing the transcription of footnotes and superscripts within `prompts/ocr.ts`. My key goal is to ensure they are explicitly captured, using either standard numbers or brackets as needed. I'm focusing on instruction clarity to avoid the model ignoring these critical elements, particularly in cases of isolated numbers. I will ensure clear instructions that override all assumptions about removing numbers.\n\n\n**Reinforcing Verbatim Instructions**\n\nI'm revisiting `prompts/ocr.ts` to solidify the \"verbatim\" directive. I'll make the character preservation instruction even more explicit. This change focuses on Step 1, ensuring original content is faithfully retained during OCR processing.\n\n\n**Reinforcing Verbatim Focus**\n\nI'm now zeroing in on the new prompt instructions within `prompts/ocr.ts`. The revised goal emphasizes 100% character accuracy and visual layout preservation. My focus is on the \"Verbatim Content\" rule: I am ensuring the model does *not* correct spelling, grammar, or summarize. The instructions are now highly explicit. I'm verifying the prompt ensures fidelity across all scripts.\n\n\\n\\n\nI'm checking that the instructions are unambiguous and cover all scenarios. While working on Step 1, I should also check Step 2, just in case.\n\n\n**Prioritizing Numbered Lists**\n\nI'm now focusing on numbered lists within `prompts/ocr.ts` and how they are handled. I need to make sure various formats are considered: \"1.\", \"1)\", \"(1)\", \"I.\", \"a.\" and are correctly transcribed as verbatim characters. My priority is to integrate clear instructions for table rendering in Markdown. I'm also addressing footnote/superscript capture. I'll make sure there are explicit directives to capture small, floating numbers, using bracketed notation if needed, and without any assumptions of ignoring numbers between lines. I am verifying that these instructions are not overwritten during the OCR process.\n\n\n**Confirming Native Stability**\n\nI'm verifying that the `extractTextFast` function in `services/pdfExtractor.ts` isn't making unwanted character swaps, since the user's issue seems tied to AI-based OCR. I'm confirming that native PDF extraction with PDF.js isn't the problem and that characters like bullet points are correctly read. My focus will be on the prompt, confirming its role in list conversion.\n\n\n**Confirming Direct OCR Impact**\n\nI'm now certain that the user's issue with bullet points lies within the OCR (Vision) mode and its associated prompt, specifically the Deep OCR processing. With that in mind, I can confirm that prompt updates will cover this behavior. I've ruled out the `extractTextFast` function and the native extraction process since the bullet points are, by default, retained. I will add changes to the prompts.\n\n\n**Refining Native Process**\n\nI'm now fully confident that the root cause lies within OCR (Vision) mode and its prompt instructions, specifically concerning bullet point conversion. The `extractTextFast` function and native extraction correctly preserve characters. I'm focusing on the prompt updates to ensure that bullet points, numbering, formatting, and verbatim instructions are properly addressed and implemented.\n\n\n**Reinforcing Verbatim Integrity**\n\nI'm now integrating the updated \"Verbatim Content\" rule, and double-checking `prompts/cleaning.ts` to ensure list items are not inadvertently altered, particularly regarding line merging. This reinforces character fidelity and preserves original list structures, addressing the potential impact on bullet lists and numbered lists. My focus is on ensuring original content and not merging lines in lists.\n\n\n**Adjusting OCR Output**\n\nI'm now revising the OCR prompt to avoid Markdown list standardization. The instruction for a \"raw Markdown string\" is problematic. I'll replace it with \"raw text\" to enforce verbatim character retention. This ensures bullet points and numbered lists are preserved as-is, reflecting the user's primary concerns and avoiding unwanted list conversions during the OCR process. This change should make step 1 more verbatim.\n\n\n**Finalizing Verbatim Instructions**\n\nI'm now implementing the final, expanded instructions in the OCR prompts. The goal is to enforce 100% character precision, script agnosticism, and visual structure preservation, with focus on bullet points, numbered lists, and verbatim retention. The updated instructions explicitly focus on the 'verbatim' character preservation. The current focus is on the correct handling of lists.\n\n\n",
+      "cMarkNode": {}
+    },
+    "createdTimestamp": {
+      "seconds": 1771330467,
+      "nanos": 374000000
+    },
+    "doneTimestamp": {
+      "seconds": 1771330559,
+      "nanos": 395000000
+    }
+  },
+  {
+    "id": 2,
+    "author": "model",
+    "payload": {
+      "type": "generationTable",
+      "entries": [
+        {
+          "path": "prompts/ocr.ts",
+          "generationType": 1,
+          "isDone": true,
+          "description": "Updated OCR prompt to explicitly preserve bullet characters (e.g. •) and enforce strict verbatim transcription of lists items.",
+          "diffs": [
+            {
+              "target": "",
+              "replacement": "\n\n// ============================================================================\n// STEP 0: OCR VISION (IMAGE -> MARKDOWN)\n// ============================================================================\n// Used when \"Deep OCR\" mode is active.\n// Goal: 100% Character accuracy + Visual Layout preservation.\n\nexport const PROMPT_OCR_VISION = `\nYou are a state-of-the-art Optical Character Recognition (OCR) engine. \n**GOAL:** Transcribe the text from the image with 100% character precision while preserving the **VISUAL STRUCTURE**.\n\n**RULES:**\n1. **Verbatim Content:** Do NOT correct spelling. Do NOT fix grammar. Do NOT summarize. Transcribe exactly what you see. Do NOT change the content of list items or headers.\n2. **Global Scripts:** You must support ANY script (Latin, Cyrillic, Chinese, Japanese, Korean, Arabic, Vietnamese, Hebrew, etc.) detected in the image.\n3. **Visual Hierarchy & Formatting:**\n   - Detect headers visually (large/bold text) and use Markdown headers (#, ##, ###).\n   - **Lists & Bullets:** **CRITICAL:** You must PRESERVE the EXACT bullet character used in the original image (e.g., •, -, *, ➢, ■). **DO NOT** convert '•' to '-' or any other character. If it looks like a bullet (•), keep it as (•).\n   - **Numbers:** Preserve the exact numbering format (e.g., \"1.\", \"1)\", \"(1)\", \"I.\", \"a.\").\n   - **Indentation:** Preserve visual indentation for lists and paragraphs.\n4. **Tables:** If there is a table, represent it as a Markdown table.\n5. **Footnotes & Superscripts (CRITICAL):** \n   - Detect small/floating numbers attached to words or years (e.g., \"1965¹\" or \"text²\").\n   - **TRANSCRIBE THEM** explicitly. You may use a standard number (e.g., \"1965 1\") or brackets (e.g., \"1965(1)\") to ensure they are not lost. \n   - **DO NOT IGNORE** numbers that appear isolated between lines.\n\n**OUTPUT:**\nReturn ONLY the raw text. No introduction, no \"Here is the text\", no code blocks.\n`;"
+            }
+          ]
+        }
+      ]
+    },
+    "createdTimestamp": {
+      "seconds": 1771330559,
+      "nanos": 395000000
+    },
+    "doneTimestamp": {
+      "seconds": 1771330564,
+      "nanos": 211000000
+    }
+  }
+]

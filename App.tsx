@@ -34,6 +34,50 @@ const App: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const cancelRef = useRef(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const oscillatorRef = useRef<OscillatorNode | null>(null);
+
+  // --- BACKGROUND THROTTLING PREVENTION ---
+  useEffect(() => {
+    if (state.stage !== ProcessingStage.IDLE) {
+      // Start silent audio
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      
+      if (audioContextRef.current.state === 'suspended') {
+        audioContextRef.current.resume();
+      }
+
+      if (!oscillatorRef.current) {
+        const osc = audioContextRef.current.createOscillator();
+        const gain = audioContextRef.current.createGain();
+        gain.gain.value = 0; // Silent
+        osc.connect(gain);
+        gain.connect(audioContextRef.current.destination);
+        osc.start();
+        oscillatorRef.current = osc;
+      }
+    } else {
+      // Stop silent audio
+      if (oscillatorRef.current) {
+        oscillatorRef.current.stop();
+        oscillatorRef.current.disconnect();
+        oscillatorRef.current = null;
+      }
+      if (audioContextRef.current && audioContextRef.current.state !== 'suspended') {
+        audioContextRef.current.suspend();
+      }
+    }
+
+    return () => {
+      if (oscillatorRef.current) {
+        oscillatorRef.current.stop();
+        oscillatorRef.current.disconnect();
+        oscillatorRef.current = null;
+      }
+    };
+  }, [state.stage]);
 
   // Status Checkers
   const hasChunks = state.chunks.length > 0;
@@ -141,7 +185,7 @@ const App: React.FC = () => {
   };
 
   const getModelConfig = () => {
-      const map: Record<string, string> = { FLASH_2_0: 'gemini-2.0-flash', FLASH: 'gemini-3-flash-preview', PRO: 'gemini-3-pro-preview', FLASH_THINKING: 'gemini-3-flash-preview' };
+      const map: Record<string, string> = { FLASH_2_0: 'gemini-2.0-flash', FLASH: 'gemini-3-flash-preview', PRO: 'gemini-3-pro-preview', PRO_3_1: 'gemini-3.1-pro-preview', FLASH_THINKING: 'gemini-3-flash-preview' };
       return { 
           label: state.modelType === 'FLASH_THINKING' ? 'gemini-3-flash-preview (Think)' : map[state.modelType] || 'gemini-2.0-flash', 
           modelName: map[state.modelType] || 'gemini-2.0-flash', 
@@ -150,10 +194,12 @@ const App: React.FC = () => {
   };
 
   const runExtraction = async () => {
-    if (state.files.length === 0) return; cancelRef.current = false;
+    if (state.files.length === 0) return; 
+    cancelRef.current = false;
     setState(prev => ({ ...prev, stage: ProcessingStage.EXTRACTING, progress: 0, error: null, chunks: [] }));
     setActiveTab('RAW');
-    const { modelName } = getModelConfig(); let allChunks: Chunk[] = [];
+    const { modelName } = getModelConfig(); 
+    let allChunks: Chunk[] = [];
     let autoDetectedLang: LanguageCode = 'AUTO';
 
     try {
@@ -161,22 +207,67 @@ const App: React.FC = () => {
             if (cancelRef.current) throw new Error("Cancelled by user");
             const f = state.files[i];
             let txt = '';
-            if (f.type === 'application/pdf') {
-                txt = state.mode === 'FAST' ? await extractTextFast(f) : await processBatchImagesOCR(await extractImagesForDeepOCR(f), incrementApiCount, modelName);
-            } else {
-                 txt = await f.text(); 
-            }
-            
-            if (i === 0 && state.language === 'AUTO') {
-                const detected = detectLanguage(txt);
-                if (detected !== 'AUTO') {
-                    autoDetectedLang = detected;
-                    console.log(`[AutoDetect] Language identified: ${detected}`);
-                }
-            }
 
-            allChunks.push(...createChunks(txt, state.targetChunkSize, f.name, allChunks.length));
-            setState(prev => ({ ...prev, chunks: [...allChunks], progress: ((i + 1) / state.files.length) * 100 }));
+            // --- DEEP OCR BATCHING STRATEGY ---
+            if (f.type === 'application/pdf' && state.mode === 'DEEP_OCR') {
+                const images = await extractImagesForDeepOCR(f);
+                const BATCH_SIZE = 3; // Process 3 pages at a time to prevent API overload and provide visual feedback
+                
+                for (let j = 0; j < images.length; j += BATCH_SIZE) {
+                    if (cancelRef.current) throw new Error("Cancelled by user");
+                    
+                    const batchImages = images.slice(j, j + BATCH_SIZE);
+                    const batchText = await processBatchImagesOCR(batchImages, incrementApiCount, modelName);
+                    
+                    // Auto-Detect Language on the first batch of the first file
+                    if (i === 0 && j === 0 && state.language === 'AUTO') {
+                        const detected = detectLanguage(batchText);
+                        if (detected !== 'AUTO') {
+                            autoDetectedLang = detected;
+                            console.log(`[AutoDetect] Language identified: ${detected}`);
+                        }
+                    }
+
+                    const newChunk: Chunk = {
+                        id: allChunks.length,
+                        fileName: `${f.name} [Pages ${j+1}-${Math.min(j+BATCH_SIZE, images.length)}]`,
+                        originalText: batchText,
+                        cleanedText: '',
+                        step1Text: '',
+                        step2Text: '',
+                        finalText: '',
+                        status: 'PENDING'
+                    };
+                    
+                    allChunks.push(newChunk);
+                    
+                    // CRITICAL: Update state INSIDE loop to give "Real Vision" of progress
+                    setState(prev => ({ 
+                        ...prev, 
+                        chunks: [...allChunks], 
+                        progress: ((j + 1) / images.length) * 100 
+                    }));
+                }
+            } 
+            // --- FAST MODE / TEXT MODE ---
+            else {
+                if (f.type === 'application/pdf') {
+                    txt = await extractTextFast(f);
+                } else {
+                    txt = await f.text(); 
+                }
+                
+                if (i === 0 && state.language === 'AUTO') {
+                    const detected = detectLanguage(txt);
+                    if (detected !== 'AUTO') {
+                        autoDetectedLang = detected;
+                        console.log(`[AutoDetect] Language identified: ${detected}`);
+                    }
+                }
+
+                allChunks.push(...createChunks(txt, state.targetChunkSize, f.name, allChunks.length));
+                setState(prev => ({ ...prev, chunks: [...allChunks], progress: ((i + 1) / state.files.length) * 100 }));
+            }
         }
         
         setState(prev => ({ 
@@ -207,9 +298,12 @@ const App: React.FC = () => {
       for (let i = 0; i < state.chunks.length; i++) {
           if (cancelRef.current) break;
           const c = state.chunks[i];
-          if (c.fileName !== curFile) { 
+          // Use substring matching for filename to handle paginated chunks in Deep OCR mode
+          const baseFileName = c.fileName.split('[Page')[0]; 
+          
+          if (baseFileName !== curFile) { 
               prevCtx = ""; 
-              curFile = c.fileName; 
+              curFile = baseFileName; 
               skipAnnex = false; 
               lastLevel = -1; // Reset level on new file to -1
           }
@@ -383,7 +477,7 @@ const App: React.FC = () => {
                  </div>
                  <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex gap-1"><button onClick={() => setState(s => ({...s, includeAnnexes: !s.includeAnnexes}))} className={`px-3 py-1 rounded text-[10px] font-bold uppercase transition-all ${state.includeAnnexes ? 'bg-white text-green-600 shadow-sm' : 'text-red-500'}`}>{state.includeAnnexes ? 'INCLUDE' : 'SKIP'}</button></div>
                  <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex gap-1">
-                     {['FLASH_2_0', 'FLASH', 'FLASH_THINKING', 'PRO'].map(m => <button key={m} onClick={() => setState(s => ({...s, modelType: m as any}))} className={`px-3 py-1 rounded text-[10px] font-bold font-mono transition-all ${state.modelType === m ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-400'}`}>{m.replace('FLASH_THINKING', 'THINK').replace('FLASH_2_0', '2.0').replace('FLASH', '3.0')}</button>)}
+                     {['FLASH_2_0', 'FLASH', 'FLASH_THINKING', 'PRO', 'PRO_3_1'].map(m => <button key={m} onClick={() => setState(s => ({...s, modelType: m as any}))} className={`px-3 py-1 rounded text-[10px] font-bold font-mono transition-all ${state.modelType === m ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-400'}`}>{m === 'FLASH_2_0' ? '2.0' : m === 'FLASH' ? '3.0' : m === 'FLASH_THINKING' ? 'THINK' : m === 'PRO' ? 'PRO' : '3.1 PRO'}</button>)}
                  </div>
              </div>
         </div>
