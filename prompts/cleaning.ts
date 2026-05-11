@@ -20,8 +20,12 @@ The input text contains "--- PAGE N START ---" and "--- PAGE N END ---" markers.
    - **IF Western/Cyrillic/Vietnamese/Arabic:** Join lines adding a SINGLE SPACE.
    - **IF Hyphenated split:** Remove hyphen and join (e.g. "pro-\ncess" -> "process").
 
-2. **PROTECT HEADERS (CRITICAL):**
+2. **PROTECT AND CONSOLIDATE HEADERS (CRITICAL):**
    - **DO NOT MERGE** a Headline into the following paragraph.
+   - **CONSOLIDATE SPLIT HEADERS:** If a headline is split across multiple lines, you MUST merge them into a **SINGLE LINE**.
+     - *Example 1:* "ARTICLE 1" on line 1, "DEFINITIONS" on line 2 -> **"ARTICLE 1 DEFINITIONS"**
+   - **SPLIT INLINE CONTENT:** If the OCR read a headline and its body content on the SAME LINE, you MUST split them with a newline.
+     - *Example:* "Article 24 (Title) (1) The State..." -> Line 1: "Article 24 (Title)", Line 2: "(1) The State..."
    - Headlines often lack punctuation or are capitalized.
    - **UNIVERSAL HEADER DETECTION:** Treat ANY line that looks like a structural divider as a Header (e.g., "Article X", "Chapter Y", "Section Z", "Điều 1", "Chương 2", "第1章", "Статья 5", "Luật số", "Phần I").
 

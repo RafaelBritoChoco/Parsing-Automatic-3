@@ -20,7 +20,7 @@ import * as FormatUtils from './services/formatUtils';
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>({
     files: [], mode: 'FAST', chunkingMode: 'AUTO', modelType: 'FLASH_2_0', 
-    cleaningMode: 'DETERMINISTIC', targetChunkSize: 50000, chunks: [],
+    cleaningMode: 'DETERMINISTIC', targetChunkSize: 25000, chunks: [],
     stage: ProcessingStage.IDLE, progress: 0, error: null, totalTime: 0,
     apiCallCount: 0, auditReport: null, showTranslation: false,
     includeAnnexes: true, language: 'AUTO',
@@ -34,50 +34,6 @@ const App: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const cancelRef = useRef(false);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const oscillatorRef = useRef<OscillatorNode | null>(null);
-
-  // --- BACKGROUND THROTTLING PREVENTION ---
-  useEffect(() => {
-    if (state.stage !== ProcessingStage.IDLE) {
-      // Start silent audio
-      if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      }
-      
-      if (audioContextRef.current.state === 'suspended') {
-        audioContextRef.current.resume();
-      }
-
-      if (!oscillatorRef.current) {
-        const osc = audioContextRef.current.createOscillator();
-        const gain = audioContextRef.current.createGain();
-        gain.gain.value = 0; // Silent
-        osc.connect(gain);
-        gain.connect(audioContextRef.current.destination);
-        osc.start();
-        oscillatorRef.current = osc;
-      }
-    } else {
-      // Stop silent audio
-      if (oscillatorRef.current) {
-        oscillatorRef.current.stop();
-        oscillatorRef.current.disconnect();
-        oscillatorRef.current = null;
-      }
-      if (audioContextRef.current && audioContextRef.current.state !== 'suspended') {
-        audioContextRef.current.suspend();
-      }
-    }
-
-    return () => {
-      if (oscillatorRef.current) {
-        oscillatorRef.current.stop();
-        oscillatorRef.current.disconnect();
-        oscillatorRef.current = null;
-      }
-    };
-  }, [state.stage]);
 
   // Status Checkers
   const hasChunks = state.chunks.length > 0;
@@ -99,6 +55,14 @@ const App: React.FC = () => {
     const targetIndex = sequence.indexOf(state.autoRunTarget);
 
     const executeNext = async () => {
+        // Prevent infinite loops if a step fails completely but doesn't throw a global error
+        const hasFailedChunks = state.chunks.some(c => c.status === 'FAILED');
+        if (hasFailedChunks) {
+            console.log("[AutoRun] Aborting due to failed chunks.");
+            setState(s => ({ ...s, autoRunTarget: null, error: "Auto-run aborted because one or more chunks failed." }));
+            return;
+        }
+
         if (!hasChunks) {
             console.log("[AutoRun] Starting Extraction...");
             await runExtraction();
@@ -137,9 +101,20 @@ const App: React.FC = () => {
   }, [state.stage, state.autoRunTarget, hasChunks, hasCleaned, hasStep1, hasStep2, hasFinal, state.error]);
 
 
+  // --- TIMER ORCHESTRATOR ---
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (state.stage !== ProcessingStage.IDLE && state.stage !== ProcessingStage.ERROR) {
+      interval = setInterval(() => {
+        setState(prev => ({ ...prev, totalTime: prev.totalTime + 1 }));
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [state.stage]);
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      setState(prev => ({ ...prev, files: Array.from(e.target.files!), chunks: [], stage: ProcessingStage.IDLE, error: null, apiCallCount: 0, auditReport: null, autoRunTarget: null }));
+      setState(prev => ({ ...prev, files: Array.from(e.target.files!), chunks: [], stage: ProcessingStage.IDLE, error: null, apiCallCount: 0, totalTime: 0, auditReport: null, autoRunTarget: null }));
       setActiveTab('RAW');
     }
   };
@@ -151,6 +126,7 @@ const App: React.FC = () => {
 
   const triggerImport = (targetStep: 'CLEAN' | 'MACRO' | 'MICRO' | 'PATCH') => {
       setImportTargetStep(targetStep);
+      // Use standard setTimeout here because browsers block file dialogs triggered by Web Workers
       setTimeout(() => importInputRef.current?.click(), 0);
   };
 
@@ -178,7 +154,7 @@ const App: React.FC = () => {
               }
               return { ...c, ...update, status: 'PENDING' as const };
           });
-          setState(prev => ({ ...prev, chunks: finalChunks, stage: ProcessingStage.IDLE, files: [file] }));
+          setState(prev => ({ ...prev, chunks: finalChunks, stage: ProcessingStage.IDLE, files: [file], totalTime: 0 }));
           setActiveTab(nextTab);
           setImportTargetStep(null);
       } catch (err: any) { alert("Error importing: " + err.message); }
@@ -211,43 +187,97 @@ const App: React.FC = () => {
             // --- DEEP OCR BATCHING STRATEGY ---
             if (f.type === 'application/pdf' && state.mode === 'DEEP_OCR') {
                 const images = await extractImagesForDeepOCR(f);
-                const BATCH_SIZE = 3; // Process 3 pages at a time to prevent API overload and provide visual feedback
                 
-                for (let j = 0; j < images.length; j += BATCH_SIZE) {
-                    if (cancelRef.current) throw new Error("Cancelled by user");
-                    
-                    const batchImages = images.slice(j, j + BATCH_SIZE);
-                    const batchText = await processBatchImagesOCR(batchImages, incrementApiCount, modelName);
-                    
-                    // Auto-Detect Language on the first batch of the first file
-                    if (i === 0 && j === 0 && state.language === 'AUTO') {
-                        const detected = detectLanguage(batchText);
-                        if (detected !== 'AUTO') {
-                            autoDetectedLang = detected;
-                            console.log(`[AutoDetect] Language identified: ${detected}`);
-                        }
-                    }
-
-                    const newChunk: Chunk = {
-                        id: allChunks.length,
-                        fileName: `${f.name} [Pages ${j+1}-${Math.min(j+BATCH_SIZE, images.length)}]`,
-                        originalText: batchText,
+                // PRE-ALLOCATE CHUNKS FOR IMMEDIATE UI FEEDBACK
+                const startIndex = allChunks.length;
+                for (let j = 0; j < images.length; j++) {
+                    allChunks.push({
+                        id: startIndex + j,
+                        fileName: `${f.name} [Page ${j+1}]`,
+                        originalText: '',
                         cleanedText: '',
                         step1Text: '',
                         step2Text: '',
                         finalText: '',
-                        status: 'PENDING'
-                    };
-                    
-                    allChunks.push(newChunk);
-                    
-                    // CRITICAL: Update state INSIDE loop to give "Real Vision" of progress
-                    setState(prev => ({ 
-                        ...prev, 
-                        chunks: [...allChunks], 
-                        progress: ((j + 1) / images.length) * 100 
-                    }));
+                        status: 'PROCESSING'
+                    });
                 }
+                setState(prev => ({ ...prev, chunks: [...allChunks], progress: 0 }));
+
+                // CONCURRENT PROCESSING WITH LIMIT TO PREVENT 429 RATE LIMITS
+                // We will batch up to 5 images per API call to save money and time, but avoid timeouts.
+                const BATCH_SIZE = 5;
+                const CONCURRENCY = 2; // Max 2 batches at a time
+                let completedPages = 0;
+                const executing = new Set<Promise<void>>();
+
+                for (let j = 0; j < images.length; j += BATCH_SIZE) {
+                    if (cancelRef.current) throw new Error("Cancelled by user");
+                    
+                    const batchImages = images.slice(j, j + BATCH_SIZE);
+                    
+                    const p = (async () => {
+                        try {
+                            // Use gemini-3-flash-preview for OCR as it is the standard fast model.
+                            const text = await processBatchImagesOCR(batchImages, incrementApiCount, 'gemini-3-flash-preview');
+                            
+                            // Since we batched, we put all the text into the first chunk of this batch
+                            // and mark the others as skipped/empty to be cleaned up later.
+                            allChunks[startIndex + j].originalText = text;
+                            allChunks[startIndex + j].status = 'PENDING';
+                            
+                            for(let k = 1; k < batchImages.length; k++) {
+                                allChunks[startIndex + j + k].originalText = '';
+                                allChunks[startIndex + j + k].status = 'SKIPPED';
+                            }
+                            
+                            // Auto-Detect Language on the first page of the first file
+                            if (i === 0 && j === 0 && state.language === 'AUTO') {
+                                const detected = detectLanguage(text);
+                                if (detected !== 'AUTO') {
+                                    autoDetectedLang = detected;
+                                    console.log(`[AutoDetect] Language identified: ${detected}`);
+                                }
+                            }
+                        } catch (e: any) {
+                            allChunks[startIndex + j].originalText = `[OCR ERROR: ${e.message}]`;
+                            allChunks[startIndex + j].status = 'FAILED';
+                            for(let k = 1; k < batchImages.length; k++) {
+                                allChunks[startIndex + j + k].status = 'FAILED';
+                            }
+                        } finally {
+                            completedPages += batchImages.length;
+                            setState(prev => ({ 
+                                ...prev, 
+                                chunks: [...allChunks], 
+                                progress: (completedPages / images.length) * 100 
+                            }));
+                        }
+                    })();
+                    
+                    executing.add(p);
+                    p.finally(() => executing.delete(p));
+                    
+                    if (executing.size >= CONCURRENCY) {
+                        await Promise.race(executing);
+                    }
+                }
+                await Promise.all(executing);
+
+                // --- RE-CHUNK DEEP OCR RESULTS TO SAVE API CALLS ---
+                // After OCR is done, we merge the valid chunks into larger chunks based on targetChunkSize.
+                const validOcrChunks = allChunks.slice(startIndex).filter(c => c.status !== 'SKIPPED');
+                let fullOcrText = validOcrChunks.map(c => c.originalText).join('\n\n').trim();
+                
+                if (!fullOcrText) {
+                    fullOcrText = "[OCR ERROR: The API returned an empty response. Please try reducing the batch size or check the document.]";
+                }
+
+                const mergedChunks = createChunks(fullOcrText, state.targetChunkSize, f.name, startIndex);
+                
+                // Replace the page-by-page chunks with the merged chunks
+                allChunks.splice(startIndex, images.length, ...mergedChunks);
+                setState(prev => ({ ...prev, chunks: [...allChunks] }));
             } 
             // --- FAST MODE / TEXT MODE ---
             else {
@@ -294,18 +324,20 @@ const App: React.FC = () => {
       let curFile = ""; 
       let skipAnnex = false;
       let lastLevel = -1; // TRACKS HIERARCHY STATE: -1 indicates Start of File
+      let hierarchyMap: Record<string, number> = {}; // TRACKS GLOBAL HIERARCHY MAP
 
       for (let i = 0; i < state.chunks.length; i++) {
           if (cancelRef.current) break;
           const c = state.chunks[i];
           // Use substring matching for filename to handle paginated chunks in Deep OCR mode
-          const baseFileName = c.fileName.split('[Page')[0]; 
+          const baseFileName = c.fileName.split(' [Page')[0]; 
           
           if (baseFileName !== curFile) { 
               prevCtx = ""; 
               curFile = baseFileName; 
               skipAnnex = false; 
               lastLevel = -1; // Reset level on new file to -1
+              hierarchyMap = {}; // Reset map on new file
           }
           if (skipAnnex) { updateChunk(c.id, { [fieldMap[step]]: '', status: 'SKIPPED' }); continue; }
           updateChunk(c.id, { status: 'PROCESSING' });
@@ -314,7 +346,7 @@ const App: React.FC = () => {
               if (!input || input.includes('[SKIPPED')) { updateChunk(c.id, { status: 'FAILED' }); continue; }
               let prompt = '';
               if (step === 'CLEAN') prompt = PROMPT_CLEANING(state.language);
-              else if (step === 'MACRO') prompt = PROMPT_STEP_1(prevCtx === "", state.language);
+              else if (step === 'MACRO') prompt = PROMPT_STEP_1(prevCtx === "", state.language, prevCtx, lastLevel, hierarchyMap);
               else if (step === 'MICRO') prompt = PROMPT_STEP_2(prevCtx, state.language);
               else prompt = PROMPT_STEP_3(prevCtx, lastLevel); // PASS STATE
 
@@ -323,7 +355,36 @@ const App: React.FC = () => {
                    res = restoreLayoutDeterministically(input);
                    await new Promise(r => setTimeout(r, 50));
               } else {
-                   res = await processTextWithPrompt(input, prompt, incrementApiCount, modelName, thinkingBudget);
+                   res = await processTextWithPrompt(input, prompt, incrementApiCount, modelName, thinkingBudget, (partial) => {
+                       updateChunk(c.id, { [fieldMap[step]]: partial, status: 'PROCESSING' });
+                   });
+              }
+
+              // --- MARKDOWN INTERCEPTOR FOR MACRO STEP ---
+              if (step === 'MACRO') {
+                  // Convert Markdown headers to system tags: # -> level0, ## -> level1, ### -> level2, etc.
+                  res = res.replace(/^\s*(#{1,6})\s+(.*)$/gm, (match, hashes, content) => {
+                      const level = hashes.length - 1; 
+                      // Strip any bold/italic markdown the AI might have hallucinated
+                      // Also strip any hallucinated {{levelX}} tags to prevent duplication
+                      const cleanContent = content.replace(/\*\*/g, '').replace(/\*/g, '').replace(/{{-?level\d+}}/g, '').trim();
+                      return `{{level${level}}}${cleanContent}{{-level${level}}}`;
+                  });
+                  // Clean up any accidentally nested/repeated tags like {{level1}}{{level1}}...{{-level1}}{{-level1}}
+                  res = res.replace(/({{level\d+}})\s*\1/g, '$1');
+                  res = res.replace(/({{-level\d+}})\s*\1/g, '$1');
+              }
+
+              // --- SHORT MARKER INTERCEPTOR FOR MICRO STEP ---
+              if (step === 'MICRO') {
+                  // Convert [L#] markers to full system tags, capturing multi-line content safely.
+                  // Tolerates spaces and bolding like [**L2**] or [L 2].
+                  // CRITICAL: Lookahead uses {{footnote(?!number) to stop at footnote bodies, but NOT at inline {{footnotenumber...}} markers.
+                  res = res.replace(/\[\**L\s*(\d+)\**\]\s*([\s\S]*?)(?=\[\**L\s*\d+\**\]|{{-text_level}}|{{level\d+}}|{{footnote(?!number)|$)/g, (match, level, content) => {
+                      return `{{level${level}}}${content.trim()}{{-level${level}}}\n`;
+                  });
+                  // Clean up any empty level tags generated by adjacent markers (e.g., [L1][L1])
+                  res = res.replace(/{{level\d+}}\s*{{-level\d+}}\n?/g, '');
               }
 
               if (step === 'MACRO' && !state.includeAnnexes && res.match(/{{level\d+}}\s*(ANNEX|APPENDIX|SCHEDULE|ATTACHMENT|ANNEXE|APÊNDICE)/i)) skipAnnex = true;
@@ -331,13 +392,37 @@ const App: React.FC = () => {
               updateChunk(c.id, { [fieldMap[step]]: res, status: 'COMPLETED' }); 
               prevCtx = res.slice(-1500);
 
-              // UPDATE STATE FOR NEXT CHUNK (PATCH STEP ONLY)
-              if (step === 'PATCH') {
-                  const matches = res.match(/{{level(\d+)}}/g);
-                  if (matches && matches.length > 0) {
-                      const lastTag = matches[matches.length - 1];
-                      const levelNum = parseInt(lastTag.replace(/\D/g, ''));
-                      if (!isNaN(levelNum)) lastLevel = levelNum;
+              // UPDATE STATE FOR NEXT CHUNK (MACRO AND PATCH STEPS)
+              if (step === 'MACRO' || step === 'PATCH') {
+                  const regex = /{{level(\d+)}}(.*?){{-level\d+}}/g;
+                  let match;
+                  let foundLevel = false;
+                  while ((match = regex.exec(res)) !== null) {
+                      const levelNum = parseInt(match[1]);
+                      if (!isNaN(levelNum)) {
+                          lastLevel = levelNum;
+                          foundLevel = true;
+                          if (step === 'MACRO') {
+                              const content = match[2].trim();
+                              const keywordMatch = content.match(/^([A-Za-zÀ-ÿ]+)\b/);
+                              if (keywordMatch) {
+                                  const keyword = keywordMatch[1].toUpperCase();
+                                  const structuralKeywords = ['CAPÍTULO', 'CHAPTER', 'ARTÍCULO', 'ARTICLE', 'SECCIÓN', 'SECTION', 'PARTE', 'PART', 'TÍTULO', 'TITLE', 'CLÁUSULA', 'CLAUSE', 'ANEXO', 'ANNEX', 'APÉNDICE', 'APPENDIX', 'PREÁMBULO', 'PREAMBLE'];
+                                  if (structuralKeywords.includes(keyword) && !(keyword in hierarchyMap)) {
+                                      hierarchyMap[keyword] = levelNum;
+                                  }
+                              }
+                          }
+                      }
+                  }
+                  // Fallback if regex missed due to formatting, just to keep lastLevel updated
+                  if (!foundLevel) {
+                      const matches = res.match(/{{level(\d+)}}/g);
+                      if (matches && matches.length > 0) {
+                          const lastTag = matches[matches.length - 1];
+                          const levelNum = parseInt(lastTag.replace(/\D/g, ''));
+                          if (!isNaN(levelNum)) lastLevel = levelNum;
+                      }
                   }
               }
 
@@ -364,7 +449,9 @@ const App: React.FC = () => {
         if (!chunk[field]) continue;
         updateChunk(chunk.id, { status: 'PROCESSING' });
         try {
-            const res = await processTextWithPrompt(chunk[field] as string, prompt, incrementApiCount, modelName);
+            const res = await processTextWithPrompt(chunk[field] as string, prompt, incrementApiCount, modelName, 0, (partial) => {
+                updateChunk(chunk.id, { [field]: partial, status: 'PROCESSING' });
+            });
             updateChunk(chunk.id, { [field]: res, status: 'COMPLETED' });
         } catch (e) { updateChunk(chunk.id, { status: 'FAILED' }); break; }
         setState(prev => ({ ...prev, progress: ((i + 1) / state.chunks.length) * 100 }));
@@ -410,6 +497,7 @@ const App: React.FC = () => {
              <div>FILES: <span className="text-indigo-600">{state.files.length}</span></div>
              <div>CHUNKS: <span className="text-indigo-600">{state.chunks.length}</span></div>
              <div>API CALLS: <span className="text-indigo-600">{state.apiCallCount}</span></div>
+             <div>TIME: <span className="text-indigo-600">{Math.floor(state.totalTime / 60)}m {(state.totalTime % 60).toString().padStart(2, '0')}s</span></div>
              <div className="flex items-center gap-1">MODEL: <span className="text-purple-700 font-mono bg-purple-50 px-2 py-0.5 rounded border border-purple-200">{getModelConfig().label}</span></div>
              <div className="flex items-center gap-2">
                  {state.error ? (<div className="text-red-600 font-bold bg-red-50 px-2 py-1 rounded border border-red-200">ERROR: {state.error.substring(0, 30)}...</div>) : (<>STATUS: <span className={`${state.stage === ProcessingStage.IDLE ? 'text-green-600' : 'text-amber-500 animate-pulse'}`}>{state.stage}</span></>)}
@@ -479,6 +567,17 @@ const App: React.FC = () => {
                  <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex gap-1">
                      {['FLASH_2_0', 'FLASH', 'FLASH_THINKING', 'PRO', 'PRO_3_1'].map(m => <button key={m} onClick={() => setState(s => ({...s, modelType: m as any}))} className={`px-3 py-1 rounded text-[10px] font-bold font-mono transition-all ${state.modelType === m ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-400'}`}>{m === 'FLASH_2_0' ? '2.0' : m === 'FLASH' ? '3.0' : m === 'FLASH_THINKING' ? 'THINK' : m === 'PRO' ? 'PRO' : '3.1 PRO'}</button>)}
                  </div>
+                 <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex items-center gap-2 px-3">
+                     <span className="text-[10px] font-bold text-slate-500 uppercase">Chunk Size:</span>
+                     <select value={state.targetChunkSize} onChange={e => setState(s => ({...s, targetChunkSize: parseInt(e.target.value)}))} className="bg-transparent text-[10px] font-bold text-slate-700 outline-none cursor-pointer">
+                        <option value={10000}>10k (Safest)</option>
+                        <option value={15000}>15k (Balanced)</option>
+                        <option value={20000}>20k (Large)</option>
+                        <option value={25000}>25k (Max/Fast)</option>
+                        <option value={50000}>50k (Pro Only)</option>
+                        <option value={100000}>100k (Extreme)</option>
+                     </select>
+                 </div>
              </div>
         </div>
         <div className="grid grid-cols-5 gap-4">
@@ -504,13 +603,16 @@ const App: React.FC = () => {
                           <button onClick={runTranslationVerifier} className={`px-3 py-1.5 rounded text-xs font-bold border transition-colors flex items-center gap-1 ${state.showTranslation ? 'bg-blue-100 text-blue-700 border-blue-300' : 'bg-white border-slate-300 text-blue-600 hover:bg-blue-50'}`} disabled={state.stage !== ProcessingStage.IDLE || activeTab === 'RAW'}><IconTranslate />Verify (En)</button>
                           <button onClick={runQualityCheck} className={`px-3 py-1.5 rounded text-xs font-bold border transition-colors flex items-center gap-1 ${state.stage === ProcessingStage.AUDITING ? 'bg-purple-100 text-purple-700 border-purple-300' : 'bg-white border-slate-300 text-purple-600 hover:bg-purple-50'}`} disabled={state.stage !== ProcessingStage.IDLE}><IconSearch />Check Quality</button>
                           <button onClick={() => setIsEditing(!isEditing)} className={`px-3 py-1.5 rounded text-xs font-bold border transition-colors ${isEditing ? 'bg-yellow-100 border-yellow-300 text-yellow-800' : 'bg-white border-slate-300 text-slate-600'}`}>{isEditing ? 'Exit Edit' : 'Edit Text'}</button>
+                          {state.files.length > 1 && (
+                              <button onClick={() => FormatUtils.downloadCurrentTab(state.chunks, activeTab, true)} className="bg-slate-700 text-white px-3 py-1.5 rounded text-xs font-bold hover:bg-slate-800 flex items-center gap-1"><IconArchive /> Download Combined TXT</button>
+                          )}
                           <button onClick={() => FormatUtils.downloadCurrentTab(state.chunks, activeTab)} className="bg-slate-800 text-white px-3 py-1.5 rounded text-xs font-bold hover:bg-slate-900 flex items-center gap-1"><IconArchive /> {state.files.length > 1 ? 'Download ZIP' : `Download ${activeTab}`}</button>
                       </div>
                   </div>
                   <div className="bg-slate-50 flex-1 relative"><ResultViewer key={activeTab} text={isEditing ? FormatUtils.getActiveTextWithDelimiters(state.chunks, activeTab) : FormatUtils.getActiveTextClean(state.chunks, activeTab)} translatedText={state.showTranslation ? FormatUtils.getTranslatedTextClean(state.chunks) : undefined} isEditing={isEditing} onTextChange={(val) => setState(prev => ({ ...prev, chunks: FormatUtils.parseGlobalChange(val, prev.chunks, activeTab) }))} /></div>
               </div>
               {state.auditReport && (<div className="w-80 bg-white rounded-xl shadow-lg border border-purple-200 flex flex-col overflow-hidden animate-fade-in-right"><div className="bg-purple-50 p-4 border-b border-purple-100 flex justify-between items-center"><h3 className="font-bold text-purple-800 flex items-center gap-2"><IconCheck /> Quality Report</h3><button onClick={() => setState(s => ({...s, auditReport: null}))} className="text-purple-400 hover:text-purple-600 text-lg">&times;</button></div><div className="p-4 overflow-y-auto text-sm text-slate-700 prose prose-sm prose-purple max-h-[400px]"><pre className="whitespace-pre-wrap font-sans text-sm">{state.auditReport}</pre></div><div className="p-4 bg-purple-50 border-t border-purple-100"><button onClick={runRepair} className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded shadow-md flex items-center justify-center gap-2 transition-colors"><IconWand /> {activeTab === 'CLEAN' ? 'Auto-Fix Text' : 'Auto-Fix Structure'}</button><p className="text-[10px] text-purple-600 mt-2 text-center opacity-70">{activeTab === 'CLEAN' ? 'Fixes layout & typos (No Tags).' : 'Fixes broken syntax & tags.'}</p></div></div>)}
-              {!state.auditReport && (<div className="w-64"><div className="bg-white p-4 rounded-xl shadow border border-slate-200"><h4 className="font-bold text-slate-500 text-xs mb-4">CHUNK STATUS</h4><div className="space-y-2">{state.chunks.map(c => (<div key={c.id} className="flex flex-col bg-slate-50 p-2 rounded border border-slate-100 text-xs gap-1"><div className="flex justify-between items-center"><span className="font-mono text-slate-400">#{c.id}</span><span className={`font-bold ${c.status === 'FAILED' ? 'text-red-600' : c.status === 'PROCESSING' ? 'text-amber-500' : c.status === 'COMPLETED' ? 'text-green-600' : c.status === 'SKIPPED' ? 'text-blue-400 italic' : 'text-slate-400'}`}>{c.status}</span></div><div className="text-[10px] text-slate-400 truncate" title={c.fileName}>{c.fileName}</div></div>))}</div></div></div>)}
+              {!state.auditReport && (<div className="w-64"><div className="bg-white p-4 rounded-xl shadow border border-slate-200"><h4 className="font-bold text-slate-500 text-xs mb-4">CHUNK STATUS</h4><div className="space-y-2 max-h-[600px] overflow-y-auto pr-1">{state.chunks.map(c => (<div key={c.id} onClick={() => { const el = document.getElementById(`chunk-anchor-${c.id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className="flex flex-col bg-slate-50 p-2 rounded border border-slate-100 text-xs gap-1 cursor-pointer hover:bg-indigo-50 hover:border-indigo-200 transition-colors"><div className="flex justify-between items-center"><span className="font-mono text-slate-400">#{c.id}</span><span className={`font-bold ${c.status === 'FAILED' ? 'text-red-600' : c.status === 'PROCESSING' ? 'text-amber-500' : c.status === 'COMPLETED' ? 'text-green-600' : c.status === 'SKIPPED' ? 'text-blue-400 italic' : 'text-slate-400'}`}>{c.status}</span></div><div className="text-[10px] text-slate-400 truncate" title={c.fileName}>{c.fileName}</div></div>))}</div></div></div>)}
           </div>
       )}
     </div>

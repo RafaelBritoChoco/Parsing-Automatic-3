@@ -31,11 +31,12 @@ export const getActiveTextClean = (chunks: Chunk[], activeTab: string): string =
      let currentFile = '';
      return chunks.map(c => {
          let content = c[field] || '';
+         let prefix = `<<<< CHUNK_START: ${c.id} >>>>\n`;
          if (c.fileName !== currentFile) {
              currentFile = c.fileName;
-             return `<<<< FILE_START: ${currentFile} >>>>\n\n${content}`;
+             prefix = `<<<< FILE_START: ${currentFile} >>>>\n\n` + prefix;
          }
-         return content;
+         return `${prefix}${content}`;
      }).join('\n\n');
 }
 
@@ -43,11 +44,12 @@ export const getTranslatedTextClean = (chunks: Chunk[]): string => {
     let currentFile = '';
     return chunks.map(c => {
         let content = c.translatedText || '';
+        let prefix = `<<<< CHUNK_START: ${c.id} >>>>\n`;
          if (c.fileName !== currentFile) {
              currentFile = c.fileName;
-             return `<<<< FILE_START: ${currentFile} >>>>\n\n${content}`;
+             prefix = `<<<< FILE_START: ${currentFile} >>>>\n\n` + prefix;
          }
-         return content;
+         return `${prefix}${content}`;
     }).join('\n\n');
 };
 
@@ -69,31 +71,52 @@ export const parseGlobalChange = (newText: string, currentChunks: Chunk[], activ
     return found ? newChunks : currentChunks;
 };
 
-export const downloadCurrentTab = async (chunks: Chunk[], activeTab: string) => {
+export const downloadCurrentTab = async (chunks: Chunk[], activeTab: string, combineFiles: boolean = false) => {
     const field = getFieldForTab(activeTab);
     if (!field) return;
     const getCleanFileName = (originalName: string, tab: string) => {
         let name = originalName.replace(/\.[^/.]+$/, "");
+        name = name.replace(/ \[Page(s)? \d+(-\d+)?\]$/, ""); // Strip pagination suffix
         name = name.replace(/^(processed_[A-Z]+_)+/g, '');
         name = name.replace(/ - Step \d.*$/i, '');
         name = name.replace(/ - Raw$/i, '');
         let suffix = '';
         switch (tab) {
-            case 'RAW': suffix = 'Raw'; break;
-            case 'CLEAN': suffix = 'Step 2 - Clean'; break;
-            case 'MACRO': suffix = 'Step 3 - Macro'; break;
-            case 'MICRO': suffix = 'Step 4 - Micro'; break;
-            case 'FINAL': suffix = 'Step 5 - Final'; break;
-            default: suffix = tab;
+            case 'RAW': suffix = 'DONE step (RAW)'; break;
+            case 'CLEAN': suffix = 'DONE step (CLEAN)'; break;
+            case 'MACRO': suffix = 'DONE step (MACRO)'; break;
+            case 'MICRO': suffix = 'DONE step (MICRO)'; break;
+            case 'FINAL': suffix = 'DONE step (FINAL)'; break;
+            default: suffix = `DONE step (${tab})`;
         }
         return `${name.trim()} - ${suffix}.txt`;
     };
     const filesContent = new Map<string, string>();
     chunks.forEach(c => {
         const content = c[field] || '';
-        const current = filesContent.get(c.fileName) || '';
-        filesContent.set(c.fileName, current + content + '\n\n');
+        const baseFileName = c.fileName.replace(/ \[Page(s)? \d+(-\d+)?\]$/, "");
+        const current = filesContent.get(baseFileName) || '';
+        filesContent.set(baseFileName, current + content + '\n\n');
     });
+
+    if (combineFiles) {
+        let combinedText = '';
+        filesContent.forEach((text, fileName) => {
+            combinedText += `\n\n================================================================================\n`;
+            combinedText += `FILE: ${fileName}\n`;
+            combinedText += `================================================================================\n\n`;
+            combinedText += text;
+        });
+        const blob = new Blob([combinedText], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `Combined_Export_${activeTab}.txt`;
+        a.click();
+        URL.revokeObjectURL(url);
+        return;
+    }
+
     if (filesContent.size === 1) {
         const [fileName, text] = filesContent.entries().next().value;
         const blob = new Blob([text], { type: 'text/plain' });

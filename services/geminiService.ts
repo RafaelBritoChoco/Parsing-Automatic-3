@@ -3,8 +3,27 @@ import { PROMPT_OCR_VISION } from '../constants';
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> => {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(errorMessage));
+    }, timeoutMs);
+
+    promise.then(
+      (res) => {
+        clearTimeout(timer);
+        resolve(res);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+};
+
 // Increased default retries significantly for stability with slow models
-async function retryOperation<T>(operation: () => Promise<T>, retries = 20, delay = 2000): Promise<T> {
+async function retryOperation<T>(operation: () => Promise<T>, retries = 3, delay = 2000): Promise<T> {
   try {
     return await operation();
   } catch (error: any) {
@@ -14,8 +33,6 @@ async function retryOperation<T>(operation: () => Promise<T>, retries = 20, dela
     const errorMessage = (innerError?.message || error?.message || JSON.stringify(error)).toLowerCase();
 
     // Identify specific error types
-    // "error code: 6" is a browser XHR timeout (common with Thinking models)
-    // "503" / "504" are server overloads
     const isNetworkError = 
       errorMessage.includes('xhr error') || 
       errorMessage.includes('error code: 6') || 
@@ -39,21 +56,20 @@ async function retryOperation<T>(operation: () => Promise<T>, retries = 20, dela
     }
     
     // Log intent to retry
-    const errorType = isNetworkError ? "Network Timeout (Code 6)" : `Server Error (Code ${errorCode})`;
-    console.warn(`[Gemini Service] ${errorType} detected. Retrying... (Attempts left: ${retries})`);
+    const errorType = isNetworkError ? "Network Timeout" : errorCode === 429 ? "Rate Limit (429)" : `Server Error (Code ${errorCode})`;
+    console.warn(`[Gemini Service] ${errorType} detected. Retrying in ${delay}ms... (Attempts left: ${retries})`);
     
     // Custom Backoff Strategy:
-    // For network timeouts (Code 6), we want to retry fairly quickly but give the network a breather.
-    // For server overloads (503), we want to wait longer.
     let nextDelay = delay * 1.5;
     
     if (isNetworkError) {
-        // If it was a timeout, wait at least 5 seconds before trying again
         nextDelay = Math.max(nextDelay, 5000); 
+    } else if (errorCode === 429) {
+        nextDelay = Math.max(nextDelay, 4000); // Wait longer for rate limits
     }
 
-    // Cap delay at 30 seconds to avoid looking frozen
-    nextDelay = Math.min(nextDelay, 30000); 
+    // Cap delay at 15 seconds to avoid looking frozen
+    nextDelay = Math.min(nextDelay, 15000); 
     
     await wait(delay);
     
@@ -73,14 +89,15 @@ export const processTextWithPrompt = async (
   text: string, 
   systemInstruction: string,
   onApiCall?: () => void,
-  modelName: string = 'gemini-2.0-flash',
-  thinkingBudget: number = 0
+  modelName: string = 'gemini-3-flash-preview',
+  thinkingBudget: number = 0,
+  onProgress?: (text: string) => void
 ): Promise<string> => {
   return retryOperation(async () => {
     if (onApiCall) onApiCall();
     
     // CRITICAL: New instance per request to avoid session state corruption in browser XHR
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
     const config: any = {
       systemInstruction: systemInstruction,
@@ -89,17 +106,62 @@ export const processTextWithPrompt = async (
     };
 
     // Add Thinking Config only if explicitly requested AND supported by the model logic
-    if (thinkingBudget && thinkingBudget > 0) {
-      config.thinkingConfig = { thinkingBudget };
+    if (modelName.includes('gemini-3')) {
+        // Gemini 3 series uses thinkingLevel, not thinkingBudget. 
+        // We MUST set it to LOW by default to prevent massive latency (5+ minutes) on large chunks.
+        config.thinkingConfig = { thinkingLevel: 'LOW' };
+    } else if (thinkingBudget && thinkingBudget > 0) {
+        config.thinkingConfig = { thinkingBudget };
     }
 
-    const response = await ai.models.generateContent({
+    const chat = ai.chats.create({
       model: modelName,
-      contents: text,
       config: config,
     });
+
+    let fullText = '';
+    let isContinuing = false;
+    let maxContinuations = 5; // Allow up to 5 continuations for massive chunks
+    let continuations = 0;
+
+    while (continuations < maxContinuations) {
+        const message = isContinuing 
+            ? `Your previous response was cut off due to length limits. CONTINUE EXACTLY FROM WHERE YOU LEFT OFF. DO NOT REPEAT TEXT. Do not add any introductory remarks. Just continue the text. The last words you wrote were: "${fullText.slice(-100)}"` 
+            : text;
+
+        const responseStream = await chat.sendMessageStream({ message });
+        
+        let chunkFinishReason = '';
+        let lastProgressTime = 0;
+        for await (const chunk of responseStream) {
+            const c = chunk as any;
+            if (c.text) {
+                fullText += c.text;
+                const now = Date.now();
+                if (onProgress && (now - lastProgressTime > 100)) {
+                    onProgress(fullText);
+                    lastProgressTime = now;
+                }
+            }
+            if (c.candidates && c.candidates.length > 0 && c.candidates[0].finishReason) {
+                chunkFinishReason = c.candidates[0].finishReason;
+            }
+        }
+        
+        // Ensure final progress is sent
+        if (onProgress) onProgress(fullText);
+
+        if (chunkFinishReason === 'MAX_TOKENS') {
+            isContinuing = true;
+            continuations++;
+            if (onApiCall) onApiCall(); // Count the extra API call for the continuation
+            console.log(`[Gemini] Output truncated (MAX_TOKENS). Initiating continuation ${continuations}/${maxContinuations}...`);
+        } else {
+            break; // Finished successfully
+        }
+    }
     
-    return response.text || '';
+    return fullText;
   });
 };
 
@@ -110,10 +172,10 @@ export const processImageOCR = async (base64Image: string, onApiCall?: () => voi
   return retryOperation(async () => {
     if (onApiCall) onApiCall();
 
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-3-flash-preview',
       contents: {
         parts: [
             { inlineData: { mimeType: 'image/jpeg', data: base64Image } },
@@ -138,12 +200,12 @@ export const processImageOCR = async (base64Image: string, onApiCall?: () => voi
 export const processBatchImagesOCR = async (
     base64Images: string[], 
     onApiCall?: () => void,
-    modelName: string = 'gemini-2.0-flash'
+    modelName: string = 'gemini-3-flash-preview'
 ): Promise<string> => {
   return retryOperation(async () => {
     if (onApiCall) onApiCall();
 
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
     // Construct multipart content
     const parts: any[] = base64Images.map(b64 => ({
@@ -155,7 +217,7 @@ export const processBatchImagesOCR = async (
 
     const response = await ai.models.generateContent({
       model: modelName,
-      contents: { parts },
+      contents: parts,
       config: {
           safetySettings: SAFETY_SETTINGS,
           temperature: 0.1

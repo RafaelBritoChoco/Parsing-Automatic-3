@@ -11,12 +11,16 @@ interface ResultViewerProps {
 const ResultViewer: React.FC<ResultViewerProps> = ({ text, translatedText, isEditing, onTextChange }) => {
   const [localText, setLocalText] = useState(text);
 
+  const [visibleLines, setVisibleLines] = useState(1000);
+
   // Sync local text only when entering edit mode
   useEffect(() => {
     if (isEditing) {
       setLocalText(text);
     }
-  }, [isEditing]);
+    // Reset visible lines when text changes significantly (e.g., tab switch)
+    setVisibleLines(1000);
+  }, [isEditing, text]);
 
   // Handle local change and bubble up
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -77,10 +81,12 @@ const ResultViewer: React.FC<ResultViewerProps> = ({ text, translatedText, isEdi
   };
 
   const renderLines = (contentString: string) => {
-      const lines = contentString.split('\n');
+      const allLines = contentString.split('\n');
+      const lines = allLines.slice(0, visibleLines);
+      const hasMore = allLines.length > visibleLines;
       let activeLevel: number | null = null;
 
-      return lines.map((line, idx) => {
+      const rendered = lines.map((line, idx) => {
         const trimmed = line.trim();
         
         // --- NEW: FILE SEPARATOR RENDERER ---
@@ -97,6 +103,13 @@ const ResultViewer: React.FC<ResultViewerProps> = ({ text, translatedText, isEdi
                     </div>
                 </div>
             );
+        }
+
+        // --- NEW: CHUNK ANCHOR RENDERER ---
+        if (trimmed.startsWith('<<<< CHUNK_START:')) {
+            const chunkIdMatch = line.match(/CHUNK_START: (.*?) >>>>/);
+            const chunkId = chunkIdMatch ? chunkIdMatch[1] : '';
+            return <div key={idx} id={`chunk-anchor-${chunkId}`} className="scroll-mt-16"></div>;
         }
 
         if (!trimmed) return <div key={idx} className="h-4"></div>;
@@ -194,6 +207,21 @@ const ResultViewer: React.FC<ResultViewerProps> = ({ text, translatedText, isEdi
             </div>
         );
       });
+
+      if (hasMore) {
+          rendered.push(
+              <div key="load-more" className="mt-8 mb-8 flex justify-center">
+                  <button 
+                      onClick={() => setVisibleLines(prev => prev + 1000)}
+                      className="bg-indigo-100 text-indigo-700 px-6 py-2 rounded-full font-bold hover:bg-indigo-200 transition-colors shadow-sm"
+                  >
+                      Load More Lines ({allLines.length - visibleLines} remaining)
+                  </button>
+              </div>
+          );
+      }
+
+      return rendered;
   };
 
   // --- SPLIT VIEW RENDER ---

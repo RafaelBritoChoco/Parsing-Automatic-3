@@ -1,65 +1,44 @@
 
 // ============================================================================
-// HELPER: LEGAL HEADERS DICTIONARY
-// ============================================================================
-const getLegalHeaderTerms = (lang: string) => {
-    // UNIVERSAL LIST for AUTO mode
-    if (lang === 'AUTO') return `
-      ANY hierarchical legal header found in the document structure.
-      Examples to look for:
-      - English: Chapter, Article, Section, Part, Title
-      - Vietnamese: Chương, Điều, Mục, Khoản, Phần, Luật số
-      - Spanish/Portuguese: Capítulo, Artigo, Artículo, Seção, Título
-      - German: Kapitel, Artikel, Paragraph (§)
-      - Chinese: 第X章, 条
-      - Russian: Глава, Статья
-      **INFER THE TERMS FROM THE DOCUMENT'S VISUAL STRUCTURE (Bold/Centered).**
-    `;
-    
-    // Specific Overrides for higher precision
-    if (lang === 'VI') return 'CHƯƠNG, MỤC, ĐIỀU, KHOẢN, PHẦN, LUẬT SỐ, QUYẾT ĐỊNH';
-    if (lang === 'ZH') return '编, 章, 节, 条, 款, 项, 目';
-    if (lang === 'JA') return '編, 章, 節, 条, 項, 号';
-    if (lang === 'KO') return '편, 장, 절, 관, 조, 항, 호';
-    if (lang === 'RU') return 'РАЗДЕЛ, ГЛАВА, СТАТЬЯ, ЧАСТЬ, ПУНКТ';
-    if (lang === 'DE') return 'BUCH, TITEL, KAPITEL, ABSCHNITT, ARTIKEL, PARAGRAPH (§)';
-    if (lang === 'FR') return 'LIVRE, TITRE, CHAPITRE, SECTION, ARTICLE';
-    if (lang === 'PT' || lang === 'ES') return 'LIVRO/LIBRO, TÍTULO, CAPÍTULO, SEÇÃO/SECCIÓN, ARTIGO/ARTÍCULO';
-    
-    return 'CHAPTER, SECTION, ARTICLE, PART, TITLE, SCHEDULE, ANNEX';
-}
-
-// ============================================================================
 // STEP 3: MACRO STRUCTURING (CLEAN -> HEADLINES TAGGED)
 // ============================================================================
 // Goal: Identify the Skeleton (Headers) and Footnote References.
 
-export const PROMPT_STEP_1 = (isFirstChunk: boolean, language: string = 'AUTO') => `
-You are a Structural Analyst for a legal document.
+export const PROMPT_STEP_1 = (isFirstChunk: boolean, language: string = 'AUTO', previousContext: string = '', lastLevel: number = -1, hierarchyMap: Record<string, number> = {}) => `
+You are an Expert Legal Document Analyst and Structural Architect.
 **DETECTED LANGUAGE:** ${language === 'AUTO' ? 'DETECT FROM TEXT' : language}.
-**STEP 3 GOAL:** Identify and tag structural headlines AND inline footnote markers.
-**CRITICAL:** OUTPUT THE FULL TEXT VERBATIM. DO NOT SUMMARIZE.
+**STEP 3 GOAL:** Reconstruct the document's structural skeleton using STANDARD MARKDOWN HEADERS ONLY.
+**CRITICAL:** OUTPUT THE FULL TEXT VERBATIM. DO NOT SUMMARIZE, DO NOT SKIP ARTICLES, DO NOT CHANGE THE BODY TEXT. IF YOU SKIP EVEN A SINGLE WORD, THE PROCESS WILL FAIL.
+
+${previousContext ? `**PREVIOUS CHUNK CONTEXT:**\nThe previous part of this document ended with the following text and hierarchy:\n"""\n${previousContext}\n"""\n**CRITICAL INSTRUCTION:** You are continuing from the context above. The last active header level was H${lastLevel + 1}. Maintain the exact same hierarchical logic. Do NOT restart the top-level hierarchy unless a genuinely new top-level section begins.` : ''}
+
+${Object.keys(hierarchyMap).length > 0 ? `**GLOBAL HIERARCHY MAP ESTABLISHED:**\nYou MUST strictly follow this mapping for headers based on previous chunks:\n${Object.entries(hierarchyMap).map(([kw, lvl]) => `- "${kw}" MUST ALWAYS be H${lvl + 1}`).join('\n')}\n**CRITICAL:** Do not deviate from this mapping.` : ''}
 
 **TAG FORMATS:** 
-1. Headlines: {{levelN}}Headline Text{{-levelN}} (N >= 0)
-2. Inline Footnote Markers: {{footnotenumberN}}N{{-footnotenumberN}}
-3. Footnote Bodies: {{footnoteN}}Footnote Text{{-footnoteN}}
+1. Headlines: Use STANDARD MARKDOWN HEADERS ONLY (#, ##, ###, etc.). 
+   - **CRITICAL:** DO NOT output tags like {{level1}} or {{-level1}}. ONLY use the # symbols at the start of the line.
+   - **# (H1):** Use ONLY for the Main Document Title (e.g., "# CONSTITUTION"). ${isFirstChunk ? 'Apply this to the main title at the very beginning.' : 'DO NOT use # in this chunk. Start at ## or lower.'}
+   - **## (H2):** Use for the HIGHEST level of division present in the text (e.g., "## CHAPTER 1" or "## ARTICLE 1" if there are no chapters).
+   - **### (H3), #### (H4):** Use for sub-divisions logically nested inside the H2s.
+2. Inline Footnote Markers: {{footnotenumber[ID]}}[ID]{{-footnotenumber[ID]}} 
+   - [ID] can be a number (1, 2), letter (a, b), or symbol (*, **). Example: {{footnotenumber*}}*{{-footnotenumber*}}
+3. Footnote Bodies: {{footnote[ID]}}Footnote Text{{-footnote[ID]}} 
+   - Example: {{footnote*}}* This is the footnote text at the bottom.{{-footnote*}}
 
-**RULES:**
-1. **Headlines:** Tag the Structural skeleton of the document.
-   - **Look for keywords:** ${getLegalHeaderTerms(language)}
-   - **Universal Rule:** If the document uses a consistent pattern for division (e.g., Bold text starting with a Number, or Centered Uppercase text), treat it as a Header.
-   - **HIERARCHY (0 -> 1 -> 2):**
-     - **Level 0 (Doc Title):** The main title (e.g. "LUẬT AN NINH MẠNG", "CONSTITUTION"). Only in first chunk.
-     - **Level 1:** Major divisions (Part, Book, Title, Chương, 编, Раздел).
-     - **Level 2:** Minor divisions (Article, Section, Điều, 条, Статья).
-     - **Level 3+:** Sub-divisions (Paragraphs with headers, Khoản).
-     - **STRICT SEQUENTIAL RULE:** Start at the highest level found (e.g. 1) and go down.
-   - **MERGING:** If "CHAPTER 1" is on one line and "THE TITLE" is on the next, MERGE them: {{level1}}CHAPTER 1 THE TITLE{{-level1}}.
+**RULES FOR DYNAMIC HIERARCHY (CRITICAL):**
+1. **DO NOT USE HARDCODED RULES.** You must INTERPRET the document's actual structure based on its content.
+2. **PROHIBITION ON FORMATTING:** DO NOT add any bold (**), italic (*), or other markdown formatting to the text. You are ONLY allowed to use the # symbols at the very beginning of the lines for headers. Leave the words exactly as they are.
+3. **Top-Level Division (##):** Identify the HIGHEST level of division *present in this specific document*. 
+   - If the document is divided into "Chapters" and then "Articles", then "Chapter" is ## and "Article" is ###.
+   - **HOWEVER**, if the document has NO Chapters/Parts and is simply a list of "Articles", "Sections", or "Clauses", then "Article/Section/Clause" MUST be treated as the top-level division: ##.
+   - **NEVER** create an orphaned sub-division (e.g., ### Article) if there is no parent division (e.g., ## Chapter) above it in the document's logical structure.
+4. **Consolidate Split Headers:** If a header spans multiple lines, merge them into a single Markdown line: ## ARTICLE 1 DEFINITIONS.
+5. **SEPARATE INLINE CONTENT FROM HEADERS (CRITICAL):** If a headline (e.g., "Article X (Title)") is on the same line as the body text (e.g., "(1) The state shall..."), you **MUST SPLIT** them into two separate lines. Apply the '#' header ONLY to the title part. The body text must be placed on a new line below it without any '#'.
+   - *BAD:* ### Article 24 (Infrastructure) (1) The State shall...
+   - *GOOD:* 
+     ### Article 24 (Infrastructure)
+     (1) The State shall...
+6. **Tables:** Treat tables as body text. Do not tag internal table cells as headlines.
 
-2. **Inline Markers:** Scan the BODY text for numbers acting as references (e.g., "word1" or "term(2)"). Wrap them.
-3. **Footnote Bodies:** Identify footnotes at the bottom of pages.
-4. **Tables:** Treat tables as Body Text (do not tag internals as headlines).
-
-**OUTPUT:** Return full text with headlines and footnote markers tagged.
+**OUTPUT:** Return the full text with Markdown headers and footnote tags applied based on your contextual understanding of the document's outline.
 `;

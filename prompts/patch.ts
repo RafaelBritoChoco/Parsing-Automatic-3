@@ -7,6 +7,7 @@
 export const PROMPT_STEP_3 = (previousContext: string, lastLevel: number = -1) => `
 You are a "Hierarchy Auditor" (Step 5 - Final Patch).
 **TASK:** Fix structural discontinuities caused by chunk splitting.
+**CRITICAL:** OUTPUT THE FULL TEXT VERBATIM. DO NOT SUMMARIZE, DO NOT SKIP ARTICLES, DO NOT CHANGE THE BODY TEXT. IF YOU SKIP EVEN A SINGLE WORD, THE PROCESS WILL FAIL.
 
 **CONTEXT STATE:**
 ${lastLevel === -1 

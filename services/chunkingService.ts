@@ -12,10 +12,24 @@ export const createChunks = (fullText: string, targetSize: number, fileName: str
   let currentChunkText = '';
   let chunkId = startId;
 
+  // Regex to detect major legal headings (e.g., "Capítulo 1", "Article 5", "Sección A")
+  const isMajorHeading = (text: string) => {
+      const t = text.trim();
+      const startsWithKeyword = /^(cap[ií]tulo|art[ií]culo|secci[oó]n|t[ií]tulo|parte|anexo|ap[eé]ndice|chapter|article|section|title|part|annex|appendix|pre[aá]mbulo|preamble)\b/i.test(t);
+      // Headings are usually short (less than 200 characters) and don't end with a period (unless it's an abbreviation, but we simplify)
+      const isShort = t.length < 200;
+      return startsWithKeyword && isShort;
+  };
+
   for (const paragraph of paragraphs) {
-    // If adding this paragraph exceeds target size AND the current chunk isn't empty,
+    const isHeading = isMajorHeading(paragraph);
+    const willExceedSize = (currentChunkText.length + paragraph.length) > targetSize;
+    // We prefer to split at a major heading if the chunk is already reasonably large (e.g., > 60% of target size)
+    const isGoodSplitPoint = isHeading && currentChunkText.length > (targetSize * 0.6);
+
+    // If adding this paragraph exceeds target size OR it's a good logical split point,
     // finalize current chunk and start a new one.
-    if ((currentChunkText.length + paragraph.length) > targetSize && currentChunkText.length > 0) {
+    if ((willExceedSize || isGoodSplitPoint) && currentChunkText.length > 0) {
       chunks.push({
         id: chunkId++,
         fileName,
