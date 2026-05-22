@@ -19,8 +19,8 @@ import * as FormatUtils from './services/formatUtils';
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>({
-    files: [], mode: 'FAST', chunkingMode: 'AUTO', modelType: 'FLASH_2_0', 
-    cleaningMode: 'DETERMINISTIC', targetChunkSize: 25000, chunks: [],
+    files: [], mode: 'FAST', chunkingMode: 'AUTO', modelType: 'FLASH_3_5', 
+    cleaningMode: 'DETERMINISTIC', targetChunkSize: 20000, chunks: [],
     stage: ProcessingStage.IDLE, progress: 0, error: null, totalTime: 0,
     apiCallCount: 0, auditReport: null, showTranslation: false,
     includeAnnexes: true, language: 'AUTO',
@@ -161,11 +161,16 @@ const App: React.FC = () => {
   };
 
   const getModelConfig = () => {
-      const map: Record<string, string> = { FLASH_2_0: 'gemini-2.0-flash', FLASH: 'gemini-3-flash-preview', PRO: 'gemini-3-pro-preview', PRO_3_1: 'gemini-3.1-pro-preview', FLASH_THINKING: 'gemini-3-flash-preview' };
+      const map: Record<string, string> = { 
+          FLASH_LITE_3_1: 'gemini-3.1-flash-lite', 
+          FLASH_3_5: 'gemini-3.5-flash', 
+          FLASH_3_5_THINK: 'gemini-3.5-flash', 
+          PRO_3_1: 'gemini-3.1-pro-preview' 
+      };
       return { 
-          label: state.modelType === 'FLASH_THINKING' ? 'gemini-3-flash-preview (Think)' : map[state.modelType] || 'gemini-2.0-flash', 
-          modelName: map[state.modelType] || 'gemini-2.0-flash', 
-          thinkingBudget: state.modelType === 'FLASH_THINKING' ? 4096 : 0 
+          label: state.modelType === 'FLASH_3_5_THINK' ? 'gemini-3.5-flash (Think)' : map[state.modelType] || 'gemini-3.5-flash', 
+          modelName: map[state.modelType] || 'gemini-3.5-flash', 
+          thinkingBudget: state.modelType === 'FLASH_3_5_THINK' ? 8192 : 0 
       };
   };
 
@@ -218,8 +223,8 @@ const App: React.FC = () => {
                     
                     const p = (async () => {
                         try {
-                            // Use gemini-3-flash-preview for OCR as it is the standard fast model.
-                            const text = await processBatchImagesOCR(batchImages, incrementApiCount, 'gemini-3-flash-preview');
+                            // Use gemini-3.5-flash for OCR as it is the standard fast model.
+                            const text = await processBatchImagesOCR(batchImages, incrementApiCount, 'gemini-3.5-flash');
                             
                             // Since we batched, we put all the text into the first chunk of this batch
                             // and mark the others as skipped/empty to be cleaned up later.
@@ -565,17 +570,18 @@ const App: React.FC = () => {
                  </div>
                  <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex gap-1"><button onClick={() => setState(s => ({...s, includeAnnexes: !s.includeAnnexes}))} className={`px-3 py-1 rounded text-[10px] font-bold uppercase transition-all ${state.includeAnnexes ? 'bg-white text-green-600 shadow-sm' : 'text-red-500'}`}>{state.includeAnnexes ? 'INCLUDE' : 'SKIP'}</button></div>
                  <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex gap-1">
-                     {['FLASH_2_0', 'FLASH', 'FLASH_THINKING', 'PRO', 'PRO_3_1'].map(m => <button key={m} onClick={() => setState(s => ({...s, modelType: m as any}))} className={`px-3 py-1 rounded text-[10px] font-bold font-mono transition-all ${state.modelType === m ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-400'}`}>{m === 'FLASH_2_0' ? '2.0' : m === 'FLASH' ? '3.0' : m === 'FLASH_THINKING' ? 'THINK' : m === 'PRO' ? 'PRO' : '3.1 PRO'}</button>)}
+                     {['FLASH_LITE_3_1', 'FLASH_3_5', 'FLASH_3_5_THINK', 'PRO_3_1'].map(m => <button key={m} onClick={() => setState(s => ({...s, modelType: m as any}))} className={`px-3 py-1 rounded text-[10px] font-bold font-mono transition-all ${state.modelType === m ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-400'}`}>{m === 'FLASH_LITE_3_1' ? 'LITE' : m === 'FLASH_3_5' ? 'FLASH 3.5' : m === 'FLASH_3_5_THINK' ? 'THINK' : '3.1 PRO'}</button>)}
                  </div>
                  <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex items-center gap-2 px-3">
                      <span className="text-[10px] font-bold text-slate-500 uppercase">Chunk Size:</span>
                      <select value={state.targetChunkSize} onChange={e => setState(s => ({...s, targetChunkSize: parseInt(e.target.value)}))} className="bg-transparent text-[10px] font-bold text-slate-700 outline-none cursor-pointer">
                         <option value={10000}>10k (Safest)</option>
-                        <option value={15000}>15k (Balanced)</option>
-                        <option value={20000}>20k (Large)</option>
-                        <option value={25000}>25k (Max/Fast)</option>
-                        <option value={50000}>50k (Pro Only)</option>
+                        <option value={20000}>20k (Balanced)</option>
+                        <option value={50000}>50k (Large)</option>
                         <option value={100000}>100k (Extreme)</option>
+                        <option value={250000}>250k (Ultra)</option>
+                        <option value={500000}>500k (Heavy)</option>
+                        <option value={1000000}>1M (Max/Extreme)</option>
                      </select>
                  </div>
              </div>

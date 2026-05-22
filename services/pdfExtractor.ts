@@ -67,8 +67,32 @@ export const extractTextFast = async (file: File): Promise<string> => {
         lastWidth = width;
     }
 
+    // Identify page number candidates at the top or bottom of the page (to make it easy for CLEAN stage)
+    const lines = pageText.split('\n');
+    const totalLines = lines.length;
+    const PAGE_NUMBER_REGEX = /^\s*(?:page|pagina|página|pág|pag|trang|seite|of|de)?\s*[-–—/\\|•#]*\s*\d+\s*(?:of|de|\/|\\)?\s*\d*\s*$/i;
+    const SIMPLE_NUMBER_REGEX = /^\s*[-–—_\[\(\{#]*\s*\d+\s*[-–—_\]\)\}]*\s*$/;
+
+    const taggedLines = lines.map((line, idx) => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.length > 30) return line;
+        
+        // Check if it sits at the headers/footers (first 3 or last 3 lines)
+        const isHeaderOrFooter = idx <= 2 || idx >= totalLines - 3;
+        if (!isHeaderOrFooter) return line;
+
+        // Ensure it looks like a page number structure
+        const isPageNum = PAGE_NUMBER_REGEX.test(trimmed) || SIMPLE_NUMBER_REGEX.test(trimmed);
+        if (isPageNum) {
+            return `[PAGE_NUMBER_CANDIDATE: ${trimmed}]`;
+        }
+        return line;
+    });
+    
+    const processedPageText = taggedLines.join('\n');
+
     fullText += `--- PAGE ${i} START ---\n`;
-    fullText += pageText;
+    fullText += processedPageText;
     fullText += `\n--- PAGE ${i} END ---\n\n`;
     
     // Memory cleanup

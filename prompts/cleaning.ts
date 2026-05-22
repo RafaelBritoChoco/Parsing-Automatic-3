@@ -36,9 +36,10 @@ The input text contains "--- PAGE N START ---" and "--- PAGE N END ---" markers.
 4. **HANDLE PAGE BREAKS & ARTIFACTS:**
    - If a sentence is cut off at a page marker, **MERGE IT** according to the Language Rules (Step 1).
    - **DELETE** the Page Markers (Start/End).
+   - **PAGE NUMBER CANDIDATES (MANDATORY):** Any line explicitly flagged as '[PAGE_NUMBER_CANDIDATE: ...]' must be analyzed. If it is indeed a page number, header, or footer element, you MUST **DELETE IT ENTIRELY** to prevent page numbers from polluting the text.
    - **DELETE** explicit Page Navigation Text (e.g. "Page 12 of 50", "Trang 5", "Seite 1").
    - **PROTECT FOOTNOTE REFERENCES (CRITICAL):**
-     - **DO NOT DELETE** isolated numbers (e.g., "1", "2", "25") that stand alone on a line or at the end of a paragraph.
+     - **DO NOT DELETE** isolated numbers (e.g., "1", "2", "25") that stand alone on a line or at the end of a paragraph if they are part of the page content.
      - **ASSUME** these are Footnote References or Citation Markers. **KEEP THEM** in the text flow.
 
 **OUTPUT:**

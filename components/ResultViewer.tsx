@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 interface ResultViewerProps {
   text: string;
@@ -13,10 +13,17 @@ const ResultViewer: React.FC<ResultViewerProps> = ({ text, translatedText, isEdi
 
   const [visibleLines, setVisibleLines] = useState(1000);
 
-  // Sync local text only when entering edit mode
+  // Ref to track if the change originated from the local textarea
+  const isLocalChangeRef = useRef(false);
+
+  // Sync local text only when entering edit mode or when external text updates
   useEffect(() => {
     if (isEditing) {
-      setLocalText(text);
+      if (isLocalChangeRef.current) {
+        isLocalChangeRef.current = false;
+      } else {
+        setLocalText(text);
+      }
     }
     // Reset visible lines when text changes significantly (e.g., tab switch)
     setVisibleLines(1000);
@@ -25,6 +32,7 @@ const ResultViewer: React.FC<ResultViewerProps> = ({ text, translatedText, isEdi
   // Handle local change and bubble up
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newVal = e.target.value;
+    isLocalChangeRef.current = true;
     setLocalText(newVal);
     onTextChange(newVal);
   };
