@@ -53,6 +53,30 @@ export const getTranslatedTextClean = (chunks: Chunk[]): string => {
     }).join('\n\n');
 };
 
+export const consolidateFootnotesToEnd = (text: string): string => {
+    if (!text) return text;
+    const footnoteRegex = /({{\s*footnote\w+\s*}}[\s\S]*?{{\s*-footnote\w+\s*}})/g;
+    const matches: string[] = [];
+    let match;
+    while ((match = footnoteRegex.exec(text)) !== null) {
+        matches.push(match[1].trim());
+    }
+    if (matches.length === 0) return text;
+
+    // Remove footnote bodies from the main flow
+    let cleaned = text.replace(footnoteRegex, '');
+
+    // Merge fragmented text_level blocks caused by intervening footnotes
+    cleaned = cleaned.replace(/{{\s*-text_level\s*}}\s*({{\s*text_level\s*}})/g, '');
+
+    // Normalize spacing
+    cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trim();
+
+    // Append consolidated unique footnotes at the end
+    const uniqueFootnotes = Array.from(new Set(matches));
+    return `${cleaned}\n\n${uniqueFootnotes.join('\n\n')}`;
+};
+
 export const parseGlobalChange = (newText: string, currentChunks: Chunk[], activeTab: string): Chunk[] => {
     const regex = /--- CHUNK (\d+) ---\n([\s\S]*?)(?=(?:--- CHUNK \d+ ---)|$)/g;
     let match;

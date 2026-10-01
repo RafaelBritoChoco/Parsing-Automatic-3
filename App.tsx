@@ -4,7 +4,7 @@ import { extractTextFast, extractImagesForDeepOCR } from './services/pdfExtracto
 import { createChunks, parseChunksFromFormattedText } from './services/chunkingService';
 import { processTextWithPrompt, processBatchImagesOCR } from './services/geminiService';
 import { translateTextFree } from './services/freeTranslationService';
-import { restoreLayoutDeterministically } from './services/layoutRestorer';
+import { restoreLayoutDeterministically, splitInlineListMarkers } from './services/layoutRestorer';
 import { detectLanguage } from './services/languageDetector';
 import { AppState, ProcessingStage, Chunk, LanguageCode } from './types';
 import { 
@@ -19,7 +19,7 @@ import * as FormatUtils from './services/formatUtils';
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>({
-    files: [], mode: 'FAST', chunkingMode: 'AUTO', modelType: 'FLASH_3_5', 
+    files: [], mode: 'FAST', chunkingMode: 'AUTO', modelType: 'FLASH_3_8', 
     cleaningMode: 'DETERMINISTIC', targetChunkSize: 20000, chunks: [],
     stage: ProcessingStage.IDLE, progress: 0, error: null, totalTime: 0,
     apiCallCount: 0, auditReport: null, showTranslation: false,
@@ -163,14 +163,24 @@ const App: React.FC = () => {
   const getModelConfig = () => {
       const map: Record<string, string> = { 
           FLASH_LITE_3_1: 'gemini-3.1-flash-lite', 
-          FLASH_3_5: 'gemini-3.5-flash', 
-          FLASH_3_5_THINK: 'gemini-3.5-flash', 
+          FLASH_3_8: 'gemini-3.8-flash', 
+          FLASH_3_8_THINK: 'gemini-3.8-flash', 
+          FLASH_3_5: 'gemini-3.8-flash', 
+          FLASH_3_5_THINK: 'gemini-3.8-flash', 
           PRO_3_1: 'gemini-3.1-pro-preview' 
       };
+      const labelMap: Record<string, string> = {
+          FLASH_LITE_3_1: 'gemini-3.1-flash-lite',
+          FLASH_3_8: 'gemini-3.8-flash',
+          FLASH_3_8_THINK: 'gemini-3.8-flash (Think)',
+          PRO_3_1: 'gemini-3.1-pro-preview',
+          FLASH_3_5: 'gemini-3.8-flash',
+          FLASH_3_5_THINK: 'gemini-3.8-flash (Think)'
+      };
       return { 
-          label: state.modelType === 'FLASH_3_5_THINK' ? 'gemini-3.5-flash (Think)' : map[state.modelType] || 'gemini-3.5-flash', 
-          modelName: map[state.modelType] || 'gemini-3.5-flash', 
-          thinkingBudget: state.modelType === 'FLASH_3_5_THINK' ? 8192 : 0 
+          label: labelMap[state.modelType] || 'gemini-3.8-flash', 
+          modelName: map[state.modelType] || 'gemini-3.8-flash', 
+          thinkingBudget: (state.modelType === 'FLASH_3_8_THINK' || state.modelType === 'FLASH_3_5_THINK') ? 8192 : 0 
       };
   };
 
@@ -223,8 +233,8 @@ const App: React.FC = () => {
                     
                     const p = (async () => {
                         try {
-                            // Use gemini-3.5-flash for OCR as it is the standard fast model.
-                            const text = await processBatchImagesOCR(batchImages, incrementApiCount, 'gemini-3.5-flash');
+                            // Use gemini-3.8-flash for OCR as it is the standard fast model.
+                            const text = await processBatchImagesOCR(batchImages, incrementApiCount, 'gemini-3.8-flash');
                             
                             // Since we batched, we put all the text into the first chunk of this batch
                             // and mark the others as skipped/empty to be cleaned up later.
@@ -365,6 +375,11 @@ const App: React.FC = () => {
                    });
               }
 
+              // In CLEAN step, guarantee splitting of consecutive inline list markers (e.g. "(b) (1) Text...")
+              if (step === 'CLEAN') {
+                  res = splitInlineListMarkers(res);
+              }
+
               // --- MARKDOWN INTERCEPTOR FOR MACRO STEP ---
               if (step === 'MACRO') {
                   // Convert Markdown headers to system tags: # -> level0, ## -> level1, ### -> level2, etc.
@@ -382,6 +397,12 @@ const App: React.FC = () => {
 
               // --- SHORT MARKER INTERCEPTOR FOR MICRO STEP ---
               if (step === 'MICRO') {
+                  // Pre-pass: Split multiple inline list items with [L#] marker, e.g. [L2] (b) (1) Text...
+                  res = res.replace(/(\[\**L\s*(\d+)\**\]\s*(?:\([a-zA-Z0-9ivxlcdmIVXLCDM]+\)|[a-zA-Z0-9ivxlcdmIVXLCDM]+[\.\)]))\s+((?:\([a-zA-Z0-9ivxlcdmIVXLCDM]+\)|[a-zA-Z0-9ivxlcdmIVXLCDM]+[\.\)])\s+.*)/gm, (match, p1, lvl, rest) => {
+                      const nextLvl = parseInt(lvl, 10) + 1;
+                      return `${p1}\n[L${nextLvl}] ${rest}`;
+                  });
+
                   // Convert [L#] markers to full system tags, capturing multi-line content safely.
                   // Tolerates spaces and bolding like [**L2**] or [L 2].
                   // CRITICAL: Lookahead uses {{footnote(?!number) to stop at footnote bodies, but NOT at inline {{footnotenumber...}} markers.
@@ -390,6 +411,21 @@ const App: React.FC = () => {
                   });
                   // Clean up any empty level tags generated by adjacent markers (e.g., [L1][L1])
                   res = res.replace(/{{level\d+}}\s*{{-level\d+}}\n?/g, '');
+
+                  // Post-pass: Split any combined inline markers inside level tags, e.g. {{level2}}(b) (1) Text...{{-level2}}
+                  // into {{level2}}(b){{-level2}}\n{{level3}}(1) Text...{{-level3}}
+                  res = res.replace(/{{level(\d+)}}(\s*(?:\([a-zA-Z0-9ivxlcdmIVXLCDM]+\)|[a-zA-Z0-9ivxlcdmIVXLCDM]+[\.\)]))\s+((?:\([a-zA-Z0-9ivxlcdmIVXLCDM]+\)|[a-zA-Z0-9ivxlcdmIVXLCDM]+[\.\)])\s+[\s\S]*?){{-level\1}}/g, (match, lvl, m1, m2AndRest) => {
+                      const l1 = parseInt(lvl, 10);
+                      const l2 = l1 + 1;
+                      return `{{level${l1}}}${m1.trim()}{{-level${l1}}}\n{{level${l2}}}${m2AndRest.trim()}{{-level${l2}}}`;
+                  });
+
+                  // Move any footnote bodies out of the text and consolidate them at the end of the chunk
+                  res = FormatUtils.consolidateFootnotesToEnd(res);
+              }
+
+              if (step === 'PATCH') {
+                  res = FormatUtils.consolidateFootnotesToEnd(res);
               }
 
               if (step === 'MACRO' && !state.includeAnnexes && res.match(/{{level\d+}}\s*(ANNEX|APPENDIX|SCHEDULE|ATTACHMENT|ANNEXE|APÊNDICE)/i)) skipAnnex = true;
@@ -570,7 +606,15 @@ const App: React.FC = () => {
                  </div>
                  <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex gap-1"><button onClick={() => setState(s => ({...s, includeAnnexes: !s.includeAnnexes}))} className={`px-3 py-1 rounded text-[10px] font-bold uppercase transition-all ${state.includeAnnexes ? 'bg-white text-green-600 shadow-sm' : 'text-red-500'}`}>{state.includeAnnexes ? 'INCLUDE' : 'SKIP'}</button></div>
                  <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex gap-1">
-                     {['FLASH_LITE_3_1', 'FLASH_3_5', 'FLASH_3_5_THINK', 'PRO_3_1'].map(m => <button key={m} onClick={() => setState(s => ({...s, modelType: m as any}))} className={`px-3 py-1 rounded text-[10px] font-bold font-mono transition-all ${state.modelType === m ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-400'}`}>{m === 'FLASH_LITE_3_1' ? 'LITE' : m === 'FLASH_3_5' ? 'FLASH 3.5' : m === 'FLASH_3_5_THINK' ? 'THINK' : '3.1 PRO'}</button>)}
+                     {(['FLASH_LITE_3_1', 'FLASH_3_8', 'FLASH_3_8_THINK', 'PRO_3_1'] as const).map(m => (
+                         <button 
+                             key={m} 
+                             onClick={() => setState(s => ({...s, modelType: m}))} 
+                             className={`px-3 py-1 rounded text-[10px] font-bold font-mono transition-all ${state.modelType === m ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-400'}`}
+                         >
+                             {m === 'FLASH_LITE_3_1' ? 'LITE' : m === 'FLASH_3_8' ? 'FLASH 3.8' : m === 'FLASH_3_8_THINK' ? 'THINK' : '3.1 PRO'}
+                         </button>
+                     ))}
                  </div>
                  <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex items-center gap-2 px-3">
                      <span className="text-[10px] font-bold text-slate-500 uppercase">Chunk Size:</span>

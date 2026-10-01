@@ -10,31 +10,86 @@ interface ResultViewerProps {
 
 const ResultViewer: React.FC<ResultViewerProps> = ({ text, translatedText, isEditing, onTextChange }) => {
   const [localText, setLocalText] = useState(text);
-
+  const [isSaved, setIsSaved] = useState(true);
   const [visibleLines, setVisibleLines] = useState(1000);
 
-  // Ref to track if the change originated from the local textarea
-  const isLocalChangeRef = useRef(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const selectionRef = useRef<{ start: number; end: number; scrollTop: number } | null>(null);
+  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const latestLocalTextRef = useRef(localText);
+  latestLocalTextRef.current = localText;
 
-  // Sync local text only when entering edit mode or when external text updates
+  // Initialize or reset localText only when entering edit mode or when not editing
   useEffect(() => {
-    if (isEditing) {
-      if (isLocalChangeRef.current) {
-        isLocalChangeRef.current = false;
-      } else {
-        setLocalText(text);
-      }
+    if (!isEditing) {
+      setLocalText(text);
+      latestLocalTextRef.current = text;
+      setIsSaved(true);
     }
-    // Reset visible lines when text changes significantly (e.g., tab switch)
+  }, [isEditing, text]);
+
+  // When entering edit mode, sync localText once
+  const prevIsEditingRef = useRef(isEditing);
+  useEffect(() => {
+    if (isEditing && !prevIsEditingRef.current) {
+      setLocalText(text);
+      latestLocalTextRef.current = text;
+      setIsSaved(true);
+    }
+    prevIsEditingRef.current = isEditing;
     setVisibleLines(1000);
   }, [isEditing, text]);
 
-  // Handle local change and bubble up
+  // Restore cursor and scroll position on render
+  useEffect(() => {
+    if (isEditing && textareaRef.current && selectionRef.current) {
+      const { start, end, scrollTop } = selectionRef.current;
+      textareaRef.current.selectionStart = start;
+      textareaRef.current.selectionEnd = end;
+      textareaRef.current.scrollTop = scrollTop;
+    }
+  });
+
+  // Flush pending changes when exiting or unmounting
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        onTextChange(latestLocalTextRef.current);
+      }
+    };
+  }, [onTextChange]);
+
+  // Handle local change, save cursor/scroll, and debounce parent state updates
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newVal = e.target.value;
-    isLocalChangeRef.current = true;
+    selectionRef.current = {
+      start: e.target.selectionStart,
+      end: e.target.selectionEnd,
+      scrollTop: e.target.scrollTop
+    };
     setLocalText(newVal);
-    onTextChange(newVal);
+    latestLocalTextRef.current = newVal;
+    setIsSaved(false);
+
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+
+    debounceTimerRef.current = setTimeout(() => {
+      onTextChange(newVal);
+      setIsSaved(true);
+      debounceTimerRef.current = null;
+    }, 350);
+  };
+
+  const handleBlur = () => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    onTextChange(latestLocalTextRef.current);
+    setIsSaved(true);
   };
 
   if (!text && !isEditing) return <div className="text-gray-400 italic p-4">Waiting for results...</div>;
@@ -44,13 +99,20 @@ const ResultViewer: React.FC<ResultViewerProps> = ({ text, translatedText, isEdi
     return (
       <div className="w-full">
         <div className="bg-yellow-50 border-b border-yellow-200 px-4 py-2 text-xs text-yellow-800 font-bold flex justify-between items-center">
-             <span>EDIT MODE ACTIVE</span>
-             <span className="font-normal opacity-75">Changes saved automatically to current step</span>
+             <div className="flex items-center gap-2">
+                 <span>EDIT MODE ACTIVE</span>
+                 <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${isSaved ? 'bg-green-100 text-green-700 border border-green-200' : 'bg-amber-100 text-amber-700 border border-amber-200 animate-pulse'}`}>
+                     {isSaved ? '✓ Saved' : '● Saving...'}
+                 </span>
+             </div>
+             <span className="font-normal opacity-75">Edits preserved in real-time. Delimiters (--- CHUNK N ---) delineate sections.</span>
         </div>
         <textarea
+          ref={textareaRef}
           className="w-full h-[650px] p-6 font-mono text-sm bg-white border border-slate-300 rounded-b-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 leading-relaxed resize-none"
           value={localText}
           onChange={handleChange}
+          onBlur={handleBlur}
           spellCheck={false}
         />
       </div>

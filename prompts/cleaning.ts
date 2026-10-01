@@ -1,4 +1,3 @@
-
 // ============================================================================
 // STEP 2: CLEANING (RAW -> CLEAN)
 // ============================================================================
@@ -13,7 +12,15 @@ You are an expert Text Cleaner and Linguist.
 **INPUT CONTEXT:**
 The input text contains "--- PAGE N START ---" and "--- PAGE N END ---" markers.
 
-**RULES:**
+**STRICT FORMATTING RULES:**
+1. **NO MARKDOWN HEADERS:** Do NOT add '##' or '#' to titles. Just ensure titles are on their own distinct lines.
+2. **PRESERVE BULLETS:** Do NOT change bullet characters. 
+   - If the input has '•', keep '•'. 
+   - If the input has '1.', keep '1.'.
+   - Do NOT normalize lists to dashes '-'.
+3. **NO BOLDING:** Do NOT add '**' around text.
+
+**CLEANING RULES:**
 1. **MERGE LINES (Language Aware):** 
    - PDF extraction often breaks a single sentence into multiple lines.
    - **IF CJK (Chinese/Japanese/Korean):** Join lines directly WITHOUT spaces.
@@ -29,11 +36,23 @@ The input text contains "--- PAGE N START ---" and "--- PAGE N END ---" markers.
    - Headlines often lack punctuation or are capitalized.
    - **UNIVERSAL HEADER DETECTION:** Treat ANY line that looks like a structural divider as a Header (e.g., "Article X", "Chapter Y", "Section Z", "Điều 1", "Chương 2", "第1章", "Статья 5", "Luật số", "Phần I").
 
-3. **TABLES (CRITICAL):**
+3. **SPLIT MULTIPLE INLINE LIST PREFIXES / LIST NUMBERS (CRITICAL):**
+   - Whenever the OCR outputs two consecutive list markers, bullet markers, or list numbers on the same line (e.g., "(b) (1) Not later than...", "(a) (1) \"Artificial intelligence\""), you MUST split them onto their own separate physical lines:
+     - Line 1: The outer list item prefix only (e.g., "(b)" or "(a)").
+     - Line 2: The inner list item prefix and its following text (e.g., "(1) Not later than..." or "(1) \"Artificial intelligence\"").
+     - **EXAMPLE:**
+       Input line:
+       (b) (1) Not later than December 31, 2023, and annually thereafter...
+       Output lines:
+       (b)
+       (1) Not later than December 31, 2023, and annually thereafter...
+     - This is extremely critical because list item prefixes on the same line prevent correct downstream hierarchy assignment. Always separate them onto two lines.
+
+4. **TABLES (CRITICAL):**
    - **DO NOT FLATTEN TABLES.** 
    - Preserve spacing/columns as best as possible.
 
-4. **HANDLE PAGE BREAKS & ARTIFACTS:**
+5. **HANDLE PAGE BREAKS & ARTIFACTS:**
    - If a sentence is cut off at a page marker, **MERGE IT** according to the Language Rules (Step 1).
    - **DELETE** the Page Markers (Start/End).
    - **PAGE NUMBER CANDIDATES (MANDATORY):** Any line explicitly flagged as '[PAGE_NUMBER_CANDIDATE: ...]' must be analyzed. If it is indeed a page number, header, or footer element, you MUST **DELETE IT ENTIRELY** to prevent page numbers from polluting the text.

@@ -89,7 +89,7 @@ export const processTextWithPrompt = async (
   text: string, 
   systemInstruction: string,
   onApiCall?: () => void,
-  modelName: string = 'gemini-3.5-flash',
+  modelName: string = 'gemini-3.8-flash',
   thinkingBudget: number = 0,
   onProgress?: (text: string) => void
 ): Promise<string> => {
@@ -106,7 +106,7 @@ export const processTextWithPrompt = async (
     };
 
     // Add Thinking Config only if explicitly requested AND supported by the model logic
-    if (modelName.includes('gemini-3') || modelName.includes('gemini-3.5')) {
+    if (modelName.includes('gemini-3') || modelName.includes('gemini-3.8') || modelName.includes('gemini-3.5')) {
         // Gemini 3 series uses thinkingLevel, not thinkingBudget. 
         if (thinkingBudget && thinkingBudget > 0) {
             config.thinkingConfig = { thinkingLevel: 'HIGH' };
@@ -180,7 +180,7 @@ export const processImageOCR = async (base64Image: string, onApiCall?: () => voi
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3.8-flash',
       contents: {
         parts: [
             { inlineData: { mimeType: 'image/jpeg', data: base64Image } },
@@ -205,7 +205,7 @@ export const processImageOCR = async (base64Image: string, onApiCall?: () => voi
 export const processBatchImagesOCR = async (
     base64Images: string[], 
     onApiCall?: () => void,
-    modelName: string = 'gemini-3.5-flash'
+    modelName: string = 'gemini-3.8-flash'
 ): Promise<string> => {
   return retryOperation(async () => {
     if (onApiCall) onApiCall();

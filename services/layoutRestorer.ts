@@ -43,12 +43,30 @@ export const restoreLayoutDeterministically = (text: string): string => {
     // Step 4c: Restore paragraphs
     processed = processed.replace(new RegExp(PARAGRAPH_MARKER, 'g'), '\n\n');
 
-    // 5. NORMALIZE SPACES - REMOVED!
-    // Previous version collapsed "Code    Description" to "Code Description", destroying tables.
-    // We now KEEP multiple spaces to preserve columnar layout for the AI to see.
-    // processed = processed.replace(/[ \t]+/g, ' '); 
+    // 5. SPLIT CONSECUTIVE INLINE LIST MARKERS (CRITICAL FIX)
+    // When OCR extracts "(b) (1) Text..." or "(a) (1) Text..." on a single line,
+    // split into separate lines so hierarchy and numbering can be accurately assigned.
+    processed = splitInlineListMarkers(processed);
 
     return processed.trim();
+};
+
+/**
+ * Splits inline consecutive list markers on the same line into separate lines.
+ * Example: "(b) (1) Text..." -> "(b)\n(1) Text..."
+ */
+export const splitInlineListMarkers = (text: string): string => {
+    if (!text) return '';
+    const prefixRegex = /^(\s*(?:\([a-zA-Z0-9ivxlcdmIVXLCDM]+\)|[a-zA-Z0-9ivxlcdmIVXLCDM]+[\.\)]))\s+((?:\([a-zA-Z0-9ivxlcdmIVXLCDM]+\)|[a-zA-Z0-9ivxlcdmIVXLCDM]+[\.\)])\s+.*)$/gm;
+    let current = text;
+    let prev = '';
+    let passes = 0;
+    while (current !== prev && passes < 3) {
+        prev = current;
+        current = current.replace(prefixRegex, '$1\n$2');
+        passes++;
+    }
+    return current;
 };
 
 /**
