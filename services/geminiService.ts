@@ -173,18 +173,20 @@ export const processTextWithPrompt = async (
 /**
  * Processes a single image for OCR.
  */
-export const processImageOCR = async (base64Image: string, onApiCall?: () => void): Promise<string> => {
+export const processImageOCR = async (base64Image: string, onApiCall?: () => void, pageNum?: number): Promise<string> => {
   return retryOperation(async () => {
     if (onApiCall) onApiCall();
 
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+    const promptText = PROMPT_OCR_VISION + (pageNum ? `\n\n[PAGE CONTEXT: Page ${pageNum}]` : '');
 
     const response = await ai.models.generateContent({
       model: 'gemini-3.8-flash',
       contents: {
         parts: [
             { inlineData: { mimeType: 'image/jpeg', data: base64Image } },
-            { text: PROMPT_OCR_VISION }
+            { text: promptText }
         ]
       },
       config: {
@@ -193,9 +195,14 @@ export const processImageOCR = async (base64Image: string, onApiCall?: () => voi
       }
     });
     
-    const text = response.text || '';
-    const parts = text.split('### Extracted Text');
-    return parts.length > 1 ? parts[1].trim() : text;
+    let text = response.text || '';
+    if (text.includes('### Extracted Text')) {
+      const parts = text.split('### Extracted Text');
+      text = parts.slice(1).join('\n\n').trim();
+    }
+    // Clean up any leading/trailing markdown code blocks if the model wrapped it
+    text = text.replace(/^```(?:markdown)?\s*\n/i, '').replace(/\n```\s*$/i, '');
+    return text.trim();
   });
 };
 

@@ -23,7 +23,7 @@ export interface Chunk {
   step2Text: string; // Content
   finalText: string; // Patch/Final
   translatedText?: string; // New field for English verification
-  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'SKIPPED';
+  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'SKIPPED' | 'READY';
   lastHeadlineLevel?: number; // Context for stateful patch
 }
 

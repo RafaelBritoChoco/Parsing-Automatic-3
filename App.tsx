@@ -2,7 +2,7 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { extractTextFast, extractImagesForDeepOCR } from './services/pdfExtractor';
 import { createChunks, parseChunksFromFormattedText } from './services/chunkingService';
-import { processTextWithPrompt, processBatchImagesOCR } from './services/geminiService';
+import { processTextWithPrompt, processImageOCR } from './services/geminiService';
 import { translateTextFree } from './services/freeTranslationService';
 import { restoreLayoutDeterministically, splitInlineListMarkers } from './services/layoutRestorer';
 import { detectLanguage } from './services/languageDetector';
@@ -219,35 +219,26 @@ const App: React.FC = () => {
                 }
                 setState(prev => ({ ...prev, chunks: [...allChunks], progress: 0 }));
 
-                // CONCURRENT PROCESSING WITH LIMIT TO PREVENT 429 RATE LIMITS
-                // We will batch up to 5 images per API call to save money and time, but avoid timeouts.
-                const BATCH_SIZE = 5;
-                const CONCURRENCY = 2; // Max 2 batches at a time
+                // CONCURRENT PROCESSING PER PAGE (CRITICAL: Every page is processed individually to prevent token truncation and skipped pages)
+                const CONCURRENCY = 3; // 3 parallel page OCR requests
                 let completedPages = 0;
                 const executing = new Set<Promise<void>>();
 
-                for (let j = 0; j < images.length; j += BATCH_SIZE) {
+                for (let j = 0; j < images.length; j++) {
                     if (cancelRef.current) throw new Error("Cancelled by user");
                     
-                    const batchImages = images.slice(j, j + BATCH_SIZE);
+                    const pageIndex = j;
+                    const base64Img = images[pageIndex];
                     
                     const p = (async () => {
                         try {
-                            // Use gemini-3.8-flash for OCR as it is the standard fast model.
-                            const text = await processBatchImagesOCR(batchImages, incrementApiCount, 'gemini-3.8-flash');
-                            
-                            // Since we batched, we put all the text into the first chunk of this batch
-                            // and mark the others as skipped/empty to be cleaned up later.
-                            allChunks[startIndex + j].originalText = text;
-                            allChunks[startIndex + j].status = 'PENDING';
-                            
-                            for(let k = 1; k < batchImages.length; k++) {
-                                allChunks[startIndex + j + k].originalText = '';
-                                allChunks[startIndex + j + k].status = 'SKIPPED';
-                            }
+                            const pageNum = pageIndex + 1;
+                            const text = await processImageOCR(base64Img, incrementApiCount, pageNum);
+                            allChunks[startIndex + pageIndex].originalText = text;
+                            allChunks[startIndex + pageIndex].status = 'PENDING';
                             
                             // Auto-Detect Language on the first page of the first file
-                            if (i === 0 && j === 0 && state.language === 'AUTO') {
+                            if (i === 0 && pageIndex === 0 && state.language === 'AUTO') {
                                 const detected = detectLanguage(text);
                                 if (detected !== 'AUTO') {
                                     autoDetectedLang = detected;
@@ -255,13 +246,10 @@ const App: React.FC = () => {
                                 }
                             }
                         } catch (e: any) {
-                            allChunks[startIndex + j].originalText = `[OCR ERROR: ${e.message}]`;
-                            allChunks[startIndex + j].status = 'FAILED';
-                            for(let k = 1; k < batchImages.length; k++) {
-                                allChunks[startIndex + j + k].status = 'FAILED';
-                            }
+                            allChunks[startIndex + pageIndex].originalText = `[OCR ERROR Page ${pageIndex + 1}: ${e.message}]`;
+                            allChunks[startIndex + pageIndex].status = 'FAILED';
                         } finally {
-                            completedPages += batchImages.length;
+                            completedPages++;
                             setState(prev => ({ 
                                 ...prev, 
                                 chunks: [...allChunks], 
@@ -279,13 +267,15 @@ const App: React.FC = () => {
                 }
                 await Promise.all(executing);
 
-                // --- RE-CHUNK DEEP OCR RESULTS TO SAVE API CALLS ---
-                // After OCR is done, we merge the valid chunks into larger chunks based on targetChunkSize.
-                const validOcrChunks = allChunks.slice(startIndex).filter(c => c.status !== 'SKIPPED');
-                let fullOcrText = validOcrChunks.map(c => c.originalText).join('\n\n').trim();
+                // --- ASSEMBLE ALL EXTRACTED PAGES WITH PAGE DELIMITERS ---
+                // Format with exact page delimiters so Step 2 (Cleaning) can accurately merge sentences across page breaks
+                const pageChunks = allChunks.slice(startIndex, startIndex + images.length);
+                let fullOcrText = pageChunks.map((c, idx) => {
+                    return `--- PAGE ${idx + 1} START ---\n${c.originalText}\n--- PAGE ${idx + 1} END ---`;
+                }).join('\n\n').trim();
                 
                 if (!fullOcrText) {
-                    fullOcrText = "[OCR ERROR: The API returned an empty response. Please try reducing the batch size or check the document.]";
+                    fullOcrText = "[OCR ERROR: The API returned an empty response. Please check document quality.]";
                 }
 
                 const mergedChunks = createChunks(fullOcrText, state.targetChunkSize, f.name, startIndex);
@@ -315,8 +305,15 @@ const App: React.FC = () => {
             }
         }
         
+        // Finalize chunk status to READY once extraction is complete
+        const finalChunks = allChunks.map(c => ({
+            ...c,
+            status: (c.status === 'PENDING' || c.status === 'PROCESSING') ? ('READY' as const) : c.status
+        }));
+
         setState(prev => ({ 
             ...prev, 
+            chunks: finalChunks,
             stage: ProcessingStage.IDLE, 
             progress: 100,
             language: autoDetectedLang !== 'AUTO' ? autoDetectedLang : prev.language 
@@ -662,7 +659,50 @@ const App: React.FC = () => {
                   <div className="bg-slate-50 flex-1 relative"><ResultViewer key={activeTab} text={isEditing ? FormatUtils.getActiveTextWithDelimiters(state.chunks, activeTab) : FormatUtils.getActiveTextClean(state.chunks, activeTab)} translatedText={state.showTranslation ? FormatUtils.getTranslatedTextClean(state.chunks) : undefined} isEditing={isEditing} onTextChange={(val) => setState(prev => ({ ...prev, chunks: FormatUtils.parseGlobalChange(val, prev.chunks, activeTab) }))} /></div>
               </div>
               {state.auditReport && (<div className="w-80 bg-white rounded-xl shadow-lg border border-purple-200 flex flex-col overflow-hidden animate-fade-in-right"><div className="bg-purple-50 p-4 border-b border-purple-100 flex justify-between items-center"><h3 className="font-bold text-purple-800 flex items-center gap-2"><IconCheck /> Quality Report</h3><button onClick={() => setState(s => ({...s, auditReport: null}))} className="text-purple-400 hover:text-purple-600 text-lg">&times;</button></div><div className="p-4 overflow-y-auto text-sm text-slate-700 prose prose-sm prose-purple max-h-[400px]"><pre className="whitespace-pre-wrap font-sans text-sm">{state.auditReport}</pre></div><div className="p-4 bg-purple-50 border-t border-purple-100"><button onClick={runRepair} className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded shadow-md flex items-center justify-center gap-2 transition-colors"><IconWand /> {activeTab === 'CLEAN' ? 'Auto-Fix Text' : 'Auto-Fix Structure'}</button><p className="text-[10px] text-purple-600 mt-2 text-center opacity-70">{activeTab === 'CLEAN' ? 'Fixes layout & typos (No Tags).' : 'Fixes broken syntax & tags.'}</p></div></div>)}
-              {!state.auditReport && (<div className="w-64"><div className="bg-white p-4 rounded-xl shadow border border-slate-200"><h4 className="font-bold text-slate-500 text-xs mb-4">CHUNK STATUS</h4><div className="space-y-2 max-h-[600px] overflow-y-auto pr-1">{state.chunks.map(c => (<div key={c.id} onClick={() => { const el = document.getElementById(`chunk-anchor-${c.id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className="flex flex-col bg-slate-50 p-2 rounded border border-slate-100 text-xs gap-1 cursor-pointer hover:bg-indigo-50 hover:border-indigo-200 transition-colors"><div className="flex justify-between items-center"><span className="font-mono text-slate-400">#{c.id}</span><span className={`font-bold ${c.status === 'FAILED' ? 'text-red-600' : c.status === 'PROCESSING' ? 'text-amber-500' : c.status === 'COMPLETED' ? 'text-green-600' : c.status === 'SKIPPED' ? 'text-blue-400 italic' : 'text-slate-400'}`}>{c.status}</span></div><div className="text-[10px] text-slate-400 truncate" title={c.fileName}>{c.fileName}</div></div>))}</div></div></div>)}
+              {!state.auditReport && (<div className="w-64"><div className="bg-white p-4 rounded-xl shadow border border-slate-200"><h4 className="font-bold text-slate-500 text-xs mb-4">CHUNK STATUS</h4><div className="space-y-2 max-h-[600px] overflow-y-auto pr-1">{state.chunks.map(c => {
+                  const getStatusBadge = () => {
+                      if (c.status === 'FAILED') return <span className="font-bold text-red-600 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded text-[10px]">FAILED</span>;
+                      if (c.status === 'PROCESSING') return <span className="font-bold text-amber-500 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded text-[10px] animate-pulse">PROCESSING</span>;
+                      if (c.status === 'SKIPPED') return <span className="font-bold text-blue-400 italic bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded text-[10px]">SKIPPED</span>;
+                      
+                      // Contextual status per tab
+                      if (activeTab === 'RAW') {
+                          return <span className="font-bold text-green-600 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded text-[10px]">✓ READY</span>;
+                      }
+                      if (activeTab === 'CLEAN') {
+                          return c.cleanedText 
+                              ? <span className="font-bold text-green-600 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded text-[10px]">✓ CLEANED</span>
+                              : <span className="font-bold text-indigo-600 bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 rounded text-[10px]">READY</span>;
+                      }
+                      if (activeTab === 'MACRO') {
+                          return c.step1Text 
+                              ? <span className="font-bold text-green-600 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded text-[10px]">✓ MACRO</span>
+                              : <span className="font-bold text-slate-400 bg-slate-50 border border-slate-200 px-1.5 py-0.5 rounded text-[10px]">PENDING</span>;
+                      }
+                      if (activeTab === 'MICRO') {
+                          return c.step2Text 
+                              ? <span className="font-bold text-green-600 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded text-[10px]">✓ MICRO</span>
+                              : <span className="font-bold text-slate-400 bg-slate-50 border border-slate-200 px-1.5 py-0.5 rounded text-[10px]">PENDING</span>;
+                      }
+                      if (activeTab === 'FINAL') {
+                          return c.finalText 
+                              ? <span className="font-bold text-green-600 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded text-[10px]">✓ DONE</span>
+                              : <span className="font-bold text-slate-400 bg-slate-50 border border-slate-200 px-1.5 py-0.5 rounded text-[10px]">PENDING</span>;
+                      }
+
+                      return <span className="font-bold text-green-600 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded text-[10px]">✓ READY</span>;
+                  };
+
+                  return (
+                      <div key={c.id} onClick={() => { const el = document.getElementById(`chunk-anchor-${c.id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className="flex flex-col bg-slate-50 p-2 rounded border border-slate-100 text-xs gap-1 cursor-pointer hover:bg-indigo-50 hover:border-indigo-200 transition-colors">
+                          <div className="flex justify-between items-center">
+                              <span className="font-mono text-slate-400">#{c.id}</span>
+                              {getStatusBadge()}
+                          </div>
+                          <div className="text-[10px] text-slate-400 truncate" title={c.fileName}>{c.fileName}</div>
+                      </div>
+                  );
+              })}</div></div></div>)}
           </div>
       )}
     </div>

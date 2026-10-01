@@ -115,7 +115,7 @@ export const extractImagesForDeepOCR = async (file: File): Promise<string[]> => 
 
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
-    const viewport = page.getViewport({ scale: 1.5 }); // Reduced from 2.0 to 1.5 for faster processing without losing legibility
+    const viewport = page.getViewport({ scale: 1.8 }); // 1.8 scale gives sharp characters for OCR
     const canvas = document.createElement('canvas');
     const context = canvas.getContext('2d');
     canvas.height = viewport.height;
@@ -129,7 +129,7 @@ export const extractImagesForDeepOCR = async (file: File): Promise<string[]> => 
       context.fillRect(0, 0, canvas.width, canvas.height);
 
       await page.render({ canvasContext: context, viewport: viewport } as any).promise;
-      const base64 = canvas.toDataURL('image/jpeg', 0.7).split(',')[1]; // Reduced quality from 0.8 to 0.7 for faster upload
+      const base64 = canvas.toDataURL('image/jpeg', 0.82).split(',')[1];
       images.push(base64);
     }
     
